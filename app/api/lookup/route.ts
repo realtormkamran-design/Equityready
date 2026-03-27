@@ -1,23 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '../../../lib/supabase'
-import Anthropic from '@anthropic-ai/sdk'
-
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
 export async function POST(req: NextRequest) {
   try {
     const { leadId } = await req.json()
 
-    // Get lead data
     const { data: lead } = await supabaseAdmin
       .from('leads')
       .select('*')
       .eq('id', leadId)
       .single()
 
-    if (!lead) return NextResponse.json({ error: 'Lead not found' }, { status: 404 })
+    if (!lead) return NextResponse.json({ narrative: '' })
 
-    // Get BCA match for bedrooms/details
     const { data: bca } = await supabaseAdmin
       .from('bca_data')
       .select('*')
@@ -25,56 +20,46 @@ export async function POST(req: NextRequest) {
       .limit(1)
       .single()
 
-    const bedrooms = bca?.bedrooms || 'several'
-    const stories = bca?.stories || '2'
-    const landUse = bca?.actual_land_use || 'single family home'
-    const isSuite = landUse.toUpperCase().includes('SUITE')
+    const bedrooms = bca?.bedrooms || '3'
+    const isSuite = (bca?.actual_land_use || '').toUpperCase().includes('SUITE')
     const isMorningstar = bca?.plan_number === 'BCP1655'
 
-    const prompt = `You are a real estate market specialist for Willoughby, Langley BC. Write a personalized equity report narrative for a homeowner. Sound like a knowledgeable local expert who personally reviewed this property — warm, specific, and data-driven. Never mention AI or that this was generated.
+    const prompt = `You are a Willoughby, Langley BC real estate specialist. Write a 3-paragraph market analysis (150 words max) for a homeowner. Be specific, warm, data-driven. No AI mentions. No "I".
 
-Property details:
-- Address: ${lead.address}
-- Bedrooms: ${bedrooms}
-- Stories: ${stories}
-- ${isSuite ? 'Has a secondary suite' : 'Single family home'}
-- ${isMorningstar ? 'Original Morningstar subdivision (BCP1655) — built 2004' : 'Willoughby area home'}
-- Purchased: ${lead.purchase_date || 'approximately 2004'} for $${lead.purchase_price?.toLocaleString() || '350,000'}
-- Years owned: ${lead.years_owned || 22} years
-- 2026 BCA assessed: $${lead.bca_assessed?.toLocaleString() || '1,439,000'}
-- Equity gained: $${lead.equity_gain?.toLocaleString() || '1,096,000'}+ (${lead.equity_multiple || '4.2'}x their money)
+Property: ${lead.address}, ${bedrooms}-bedroom${isSuite ? ' with suite' : ''}, ${isMorningstar ? 'Morningstar subdivision, ' : ''}built 2004
+Purchased: ${lead.purchase_date} for $${lead.purchase_price?.toLocaleString()}
+BCA assessed 2026: $${lead.bca_assessed?.toLocaleString()}
+Equity: $${lead.equity_gain?.toLocaleString()}+ (${lead.equity_multiple}x)
+Market: $468/sqft avg, 28 days DOM, 2 of 3 homes sold above BCA by avg $111,500
 
-Market context:
-- 3 comparable sales Sept-Oct 2025 averaged $468/sqft
-- Price range: $451-$481/sqft
-- Average days on market: 28 days (fastest: 19 days)
-- 2 of 3 homes sold above BCA by average $111,500
-- Sales ranged $1,355,000 to $1,650,000
+Write 3 short paragraphs: 1) property context 2) what market data means for this home 3) timing and options.`
 
-Write 3 paragraphs (total ~180 words):
-1. Their specific property context and what makes it valuable
-2. What the market data means for their home specifically  
-3. What their timing options look like and what this equity means for them
-
-Do NOT mention AI, do NOT use salesy language, do NOT say "I" (write in third person market analysis style). Be specific to their ${bedrooms}-bedroom home.`
-
-    const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 400,
-      messages: [{ role: 'user', content: prompt }]
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY || '',
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 300,
+        messages: [{ role: 'user', content: prompt }]
+      }),
+      signal: AbortSignal.timeout(15000)
     })
 
-    const narrative = message.content[0].type === 'text' ? message.content[0].text : ''
+    const data = await response.json()
+    const narrative = data.content?.[0]?.text || ''
 
-    // Save narrative to lead
     await supabaseAdmin
       .from('leads')
-      .update({ narrative, stage: 'report_viewed' })
+      .update({ narrative })
       .eq('id', leadId)
 
     return NextResponse.json({ narrative })
   } catch (err) {
     console.error('Report error:', err)
-    return NextResponse.json({ narrative: '' }, { status: 200 })
+    return NextResponse.json({ narrative: '' })
   }
 }
