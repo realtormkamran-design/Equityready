@@ -1,377 +1,619 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 
-const RENOS = [
-  { label: 'Kitchen — full renovation', low: 25000, high: 45000 },
-  { label: 'Kitchen — partial update', low: 10000, high: 20000 },
-  { label: 'Primary bathroom — full', low: 15000, high: 25000 },
-  { label: 'Secondary bathroom', low: 8000, high: 15000 },
-  { label: 'Flooring throughout', low: 12000, high: 22000 },
-  { label: 'Basement suite added', low: 40000, high: 65000 },
-  { label: 'Deck / outdoor space', low: 8000, high: 18000 },
-  { label: 'New windows', low: 8000, high: 15000 },
-  { label: 'Fresh paint throughout', low: 5000, high: 10000 },
-  { label: 'New roof / HVAC', low: 5000, high: 10000 },
-]
-
-const BASE_LOW = 1353000
-const BASE_HIGH = 1443000
-
-function fmt(n: number) {
-  return '$' + n.toLocaleString('en-CA')
+// ─── Types ───────────────────────────────────────────────────────────────────
+interface BcaData {
+  address: string
+  purchasePrice: number
+  purchaseDate: string
+  assessedTotal: number
+  equityGain: number
+  equityMultiple: number
+  bedrooms: string
+  yearsOwned: number
+  estimateLow: number
+  estimateHigh: number
 }
 
-type Gate = 'gate1' | 'gate2' | 'gate3' | 'gate4' | 'privacy'
+interface Lead {
+  address: string
+  name: string
+  phone: string
+  email: string
+}
 
+// ─── Google Maps types ───────────────────────────────────────────────────────
+declare global {
+  interface Window {
+    google: any
+    initGoogleMaps: () => void
+  }
+}
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+const MARKET = {
+  avgPsf: 468, lowPsf: 451, highPsf: 481,
+  avgDOM: 28, fastestDOM: 19, avgAboveBCA: 111500,
+}
+
+const COMPS = [
+  { street: '69A Ave, Willoughby', sold: 'Sep 2025', bca: '$1,543,000', actual: '$1,650,000', vsBca: '+$107,000', days: 19, positive: true },
+  { street: '69 Ave, Willoughby',  sold: 'Sep 2025', bca: '$1,486,000', actual: '$1,480,000', vsBca: 'at assessed', days: 28, positive: false },
+  { street: '70A Ave, Willoughby', sold: 'Oct 2025', bca: '$1,239,000', actual: '$1,355,000', vsBca: '+$116,000', days: 38, positive: true },
+]
+
+const RENOS = [
+  { id: 'kitchen_full',    label: 'Kitchen — full renovation',  sub: '+$25,000–$45,000', low: 25000, high: 45000 },
+  { id: 'kitchen_partial', label: 'Kitchen — partial update',   sub: '+$10,000–$20,000', low: 10000, high: 20000 },
+  { id: 'bath_primary',    label: 'Primary bathroom — full',    sub: '+$15,000–$25,000', low: 15000, high: 25000 },
+  { id: 'bath_secondary',  label: 'Secondary bathroom',         sub: '+$8,000–$15,000',  low: 8000,  high: 15000 },
+  { id: 'flooring',        label: 'Flooring throughout',        sub: '+$12,000–$22,000', low: 12000, high: 22000 },
+  { id: 'suite',           label: 'Basement suite added',       sub: '+$40,000–$65,000', low: 40000, high: 65000 },
+  { id: 'deck',            label: 'Deck / outdoor space',       sub: '+$8,000–$18,000',  low: 8000,  high: 18000 },
+  { id: 'roof',            label: 'New roof',                   sub: '+$5,000–$10,000',  low: 5000,  high: 10000 },
+]
+
+// ─── Phone validation ────────────────────────────────────────────────────────
+function isValidPhone(phone: string): boolean {
+  const digits = phone.replace(/\D/g, '')
+  return digits.length >= 10 && digits.length <= 11
+}
+
+function formatPhone(raw: string): string {
+  const digits = raw.replace(/\D/g, '').slice(0, 11)
+  if (digits.length <= 3) return digits
+  if (digits.length <= 6) return `(${digits.slice(0,3)}) ${digits.slice(3)}`
+  if (digits.length <= 10) return `(${digits.slice(0,3)}) ${digits.slice(3,6)}-${digits.slice(6)}`
+  return `+${digits.slice(0,1)} (${digits.slice(1,4)}) ${digits.slice(4,7)}-${digits.slice(7)}`
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+const fmt = (n: number) => '$' + n.toLocaleString()
+
+// ─── Main component ───────────────────────────────────────────────────────────
 export default function Home() {
-  const [gate, setGate] = useState<Gate>('gate1')
+  const [gate, setGate] = useState<1|2|3|4>(1)
   const [address, setAddress] = useState('')
-  const [name, setName] = useState('')
-  const [phone, setPhone] = useState('')
-  const [email, setEmail] = useState('')
-  const [leadId, setLeadId] = useState<string | null>(null)
+  const [lead, setLead] = useState<Lead>({ address: '', name: '', phone: '', email: '' })
+  const [bcaData, setBcaData] = useState<BcaData | null>(null)
   const [narrative, setNarrative] = useState('')
-  const [loadingNarrative, setLoadingNarrative] = useState(false)
-  const [loadingUnlock, setLoadingUnlock] = useState(false)
-  const [loadingEmail, setLoadingEmail] = useState(false)
-  const [renoChecked, setRenoChecked] = useState<boolean[]>(new Array(10).fill(false))
+  const [checkedRenos, setCheckedRenos] = useState<string[]>([])
+  const [loading, setLoading] = useState(false)
+  const [phoneError, setPhoneError] = useState('')
+  const [emailSent, setEmailSent] = useState(false)
+  const [emailLoading, setEmailLoading] = useState(false)
+  const [chatOpen, setChatOpen] = useState(false)
+  const [chatMessages, setChatMessages] = useState<{role:string,text:string}[]>([
+    { role: 'assistant', text: 'Hi! I\'m here to answer any questions about your home\'s value in Willoughby. What\'s on your mind?' }
+  ])
+  const [chatInput, setChatInput] = useState('')
 
-  const renoTotLow = RENOS.reduce((s, r, i) => s + (renoChecked[i] ? r.low : 0), 0)
-  const renoTotHigh = RENOS.reduce((s, r, i) => s + (renoChecked[i] ? r.high : 0), 0)
-  const renoCount = renoChecked.filter(Boolean).length
-  const renoLow = BASE_LOW + renoTotLow
-  const renoHigh = BASE_HIGH + renoTotHigh
+  const addressInputRef = useRef<HTMLInputElement>(null)
+  const autocompleteRef = useRef<any>(null)
+  const googleMapsLoaded = useRef(false)
 
-  async function submitG1() {
+  // ── Load Google Maps ───────────────────────────────────────────────────────
+  useEffect(() => {
+    if (googleMapsLoaded.current) return
+    const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_KEY
+    if (!apiKey) return
+
+    window.initGoogleMaps = () => {
+      googleMapsLoaded.current = true
+      initAutocomplete()
+    }
+
+    const script = document.createElement('script')
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places&callback=initGoogleMaps`
+    script.async = true
+    script.defer = true
+    document.head.appendChild(script)
+  }, [])
+
+  // ── Init autocomplete when input is available ─────────────────────────────
+  const initAutocomplete = useCallback(() => {
+    if (!addressInputRef.current || !window.google) return
+    const autocomplete = new window.google.maps.places.Autocomplete(
+      addressInputRef.current,
+      {
+        componentRestrictions: { country: 'ca' },
+        fields: ['formatted_address', 'address_components', 'geometry'],
+        types: ['address'],
+        bounds: new window.google.maps.LatLngBounds(
+          { lat: 49.05, lng: -122.75 }, // SW corner of Willoughby area
+          { lat: 49.25, lng: -122.50 }  // NE corner
+        ),
+        strictBounds: false,
+      }
+    )
+    autocomplete.addListener('place_changed', () => {
+      const place = autocomplete.getPlace()
+      if (place.formatted_address) {
+        setAddress(place.formatted_address)
+      }
+    })
+    autocompleteRef.current = autocomplete
+  }, [])
+
+  // Re-init autocomplete if Google loads after component mounts
+  useEffect(() => {
+    if (gate === 1 && window.google && addressInputRef.current && !autocompleteRef.current) {
+      initAutocomplete()
+    }
+  }, [gate, initAutocomplete])
+
+  // ── Gate 1 → 2 ────────────────────────────────────────────────────────────
+  async function handleAddressSubmit() {
     if (!address.trim()) return
+    setLoading(true)
     try {
       const res = await fetch('/api/lookup', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ address, postal: 'V2Y', utmSource: new URLSearchParams(window.location.search).get('utm_source') }),
+        body: JSON.stringify({ address }),
       })
       const data = await res.json()
-      if (data.leadId) setLeadId(data.leadId)
-    } catch (e) { /* continue anyway */ }
-    setGate('gate2')
+      if (data.bcaData) setBcaData(data.bcaData)
+      setLead(prev => ({ ...prev, address }))
+    } catch {}
+    setLoading(false)
+    setGate(2)
   }
 
-  async function submitG2() {
-    if (!name || !phone) return
-    setLoadingUnlock(true)
-    try {
-      await fetch('/api/unlock', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ leadId, name, phone }),
-      })
-    } catch (e) {}
-    setLoadingUnlock(false)
-    setGate('gate3')
-    setLoadingNarrative(true)
+  // ── Gate 2 → 3 ────────────────────────────────────────────────────────────
+  async function handleUnlock() {
+    // Validate phone
+    if (!lead.name.trim() || lead.name.trim().length < 2) return
+    if (!isValidPhone(lead.phone)) {
+      setPhoneError('Please enter a valid phone number (e.g. 604-555-0123)')
+      return
+    }
+    setPhoneError('')
+    setLoading(true)
     try {
       const res = await fetch('/api/report', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ leadId }),
+        body: JSON.stringify({ address: lead.address, name: lead.name, phone: lead.phone }),
       })
       const data = await res.json()
       if (data.narrative) setNarrative(data.narrative)
-    } catch (e) {}
-    setLoadingNarrative(false)
+      if (data.bcaData) setBcaData(data.bcaData)
+    } catch {}
+    setLoading(false)
+    setGate(3)
   }
 
-  async function submitG3() {
-    if (!email) return
-    setLoadingEmail(true)
+  // ── Email PDF ──────────────────────────────────────────────────────────────
+  async function handleEmailReport() {
+    if (!lead.email || !lead.email.includes('@')) return
+    setEmailLoading(true)
     try {
       await fetch('/api/email-report', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ leadId, email }),
+        body: JSON.stringify({
+          address: lead.address,
+          name: lead.name,
+          phone: lead.phone,
+          email: lead.email,
+          bcaData,
+          narrative,
+          checkedRenos,
+        }),
       })
-    } catch (e) {}
-    setLoadingEmail(false)
-    setGate('gate4')
+      setEmailSent(true)
+    } catch {}
+    setEmailLoading(false)
+    setTimeout(() => setGate(4), 1500)
   }
 
-  function toggleReno(i: number) {
-    const next = [...renoChecked]
-    next[i] = !next[i]
-    setRenoChecked(next)
+  // ── Reno calc ─────────────────────────────────────────────────────────────
+  const renoAddLow  = checkedRenos.reduce((s, id) => s + (RENOS.find(r => r.id === id)?.low  ?? 0), 0)
+  const renoAddHigh = checkedRenos.reduce((s, id) => s + (RENOS.find(r => r.id === id)?.high ?? 0), 0)
+  const adjLow  = (bcaData?.estimateLow  ?? 1353000) + renoAddLow
+  const adjHigh = (bcaData?.estimateHigh ?? 1522000) + renoAddHigh
+
+  // ── Chat ──────────────────────────────────────────────────────────────────
+  async function handleChat() {
+    if (!chatInput.trim()) return
+    const userMsg = chatInput.trim()
+    setChatInput('')
+    setChatMessages(prev => [...prev, { role: 'user', text: userMsg }])
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: userMsg, address: lead.address }),
+      })
+      const data = await res.json()
+      setChatMessages(prev => [...prev, { role: 'assistant', text: data.reply || 'Let me connect you with Kamran directly for that question. Call +1-236-660-2594.' }])
+    } catch {
+      setChatMessages(prev => [...prev, { role: 'assistant', text: 'Reach Kamran directly at +1-236-660-2594 or Realtormkamran@gmail.com.' }])
+    }
   }
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // ── RENDER ────────────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────
   return (
-    <>
-      <style>{`
-        *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-        :root{
-          --navy:#0A1628;--navy2:#0D1F3C;
-          --teal:#0D9488;--teal2:#0F766E;
-          --gold:#C8952A;--gold2:#F0C040;--gold-bg:#FEF9EC;--gold-border:#E8B84B;
-          --white:#fff;--off:#F4F6FB;--gray:#64748B;--lgray:#CBD5E1;--border:#E2E8F0;
-          --green:#166534;--green-bg:#DCFCE7;
-        }
-        html,body{font-family:'DM Sans',system-ui,sans-serif;background:var(--navy);color:#fff;min-height:100vh;-webkit-font-smoothing:antialiased}
-        input,button,select{font-family:inherit}
-        .page{display:none;min-height:100vh;flex-direction:column}
-        .page.active{display:flex}
-        .topnav{padding:16px 24px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,.06)}
-        .logo{font-size:20px;font-weight:700;color:var(--gold2);cursor:pointer;font-family:Georgia,serif}
-        .btn{border:none;border-radius:10px;padding:13px 20px;font-size:15px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px;width:100%;transition:.18s}
-        .btn-teal{background:var(--teal);color:#fff}.btn-teal:hover{background:var(--teal2)}
-        .btn-navy{background:var(--navy);color:var(--gold2);border:1.5px solid rgba(200,149,42,.4)}.btn-navy:hover{background:var(--navy2)}
-        .inp{width:100%;padding:13px 15px;border-radius:10px;border:1.5px solid var(--border);background:#fff;font-size:16px;color:var(--navy);outline:none;transition:.18s}
-        .inp:focus{border-color:var(--teal)}
-        .inp-dark{background:rgba(255,255,255,.07);border:1.5px solid rgba(255,255,255,.1);color:#fff}
-        .inp-dark::placeholder{color:rgba(255,255,255,.3)}
-        .inp-dark:focus{border-color:var(--teal);background:rgba(255,255,255,.1)}
-        .card{background:#fff;border-radius:14px;border:1px solid var(--border);overflow:hidden}
-        .card-header{padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between}
-        .card-header h3{font-size:14px;font-weight:600;color:var(--navy)}
-        .card-body{padding:20px}
-        .stat-card{background:var(--navy2);border:1px solid rgba(255,255,255,.07);border-radius:14px;padding:22px 26px;border-top:3px solid}
-        .blur-val{filter:blur(7px);user-select:none}
-        .lock-ov{position:absolute;inset:0;background:rgba(8,18,34,.55);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px}
-        .g2-card{background:var(--navy2);border:1px solid rgba(255,255,255,.07);border-radius:13px;padding:20px 16px;text-align:center;min-height:118px;display:flex;flex-direction:column;justify-content:center;position:relative;overflow:hidden}
-        .reno-check{display:flex;align-items:flex-start;gap:8px;background:var(--off);border:1.5px solid var(--border);border-radius:8px;padding:10px 12px;cursor:pointer;transition:.15s}
-        .reno-check:hover,.reno-check.sel{border-color:var(--teal);background:rgba(13,148,136,.06)}
-        .above{color:var(--green);font-weight:600}
-        .tl-right{padding-bottom:16px;border-left:2px solid var(--border);padding-left:16px;position:relative}
-        .tl-right::before{content:'';position:absolute;left:-5px;top:6px;width:8px;height:8px;border-radius:50%;background:var(--teal)}
-        .dot{width:7px;height:7px;border-radius:50%;background:currentColor;animation:pulse 2s infinite;flex-shrink:0}
-        @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.8)}}
-        @media(max-width:700px){
-          .two-col{grid-template-columns:1fr!important}
-          .three-col{grid-template-columns:1fr!important}
-          .hide-mobile{display:none!important}
-        }
-      `}</style>
+    <div style={{ fontFamily: "'DM Sans', system-ui, sans-serif", background: '#F4F6FB', minHeight: '100vh', color: '#0F2B5B' }}>
 
-      {/* ═══ GATE 1 ═══ */}
-      <main className="page active" id="g1" style={{display: gate==='gate1'?'flex':'none', background:'var(--navy)', position:'relative', overflow:'hidden', paddingTop:40}}>
-        <div style={{position:'absolute',inset:0,pointerEvents:'none',zIndex:0}}>
-          <div style={{position:'absolute',top:'-15%',right:'-8%',width:560,height:560,borderRadius:'50%',background:'radial-gradient(circle,rgba(13,148,136,.16) 0%,transparent 68%)'}}/>
-          <div style={{position:'absolute',bottom:'-20%',left:'-8%',width:480,height:480,borderRadius:'50%',background:'radial-gradient(circle,rgba(200,149,42,.09) 0%,transparent 68%)'}}/>
-          <div style={{position:'absolute',inset:0,backgroundImage:'linear-gradient(rgba(255,255,255,.02) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.02) 1px,transparent 1px)',backgroundSize:'56px 56px'}}/>
-        </div>
+      {/* NAV */}
+      <nav style={{ background: '#0A1628', padding: '0 24px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: 64 }}>
+        <span style={{ color: '#C8952A', fontWeight: 700, fontSize: 22, letterSpacing: '-0.5px' }}>EquityReady</span>
+        <span style={{ color: '#94A3B8', fontSize: 13 }}>Your personalized report</span>
+      </nav>
 
-        <nav className="topnav" style={{position:'relative',zIndex:1}}>
-          <div className="logo">EquityReady</div>
-          <a href="#" onClick={e=>{e.preventDefault();setGate('privacy')}} style={{fontSize:12,color:'var(--gray)',textDecoration:'none'}}>Privacy</a>
-        </nav>
+      {/* ── GATE 1 ── */}
+      {gate === 1 && (
+        <div>
+          {/* Hero */}
+          <div style={{ background: '#0A1628', padding: '60px 24px 80px', textAlign: 'center' }}>
+            <p style={{ color: '#C8952A', fontWeight: 600, fontSize: 13, letterSpacing: 2, textTransform: 'uppercase', marginBottom: 16 }}>
+              Willoughby, Langley BC
+            </p>
+            <h1 style={{ color: '#fff', fontSize: 'clamp(28px, 5vw, 48px)', fontWeight: 700, lineHeight: 1.2, maxWidth: 680, margin: '0 auto 20px' }}>
+              Before you call a realtor,<br />know your number.
+            </h1>
+            <p style={{ color: '#94A3B8', fontSize: 17, maxWidth: 540, margin: '0 auto 40px' }}>
+              Recent sales show Willoughby homes selling at $451–$481/sqft — often well above assessed value. See what yours is actually worth.
+            </p>
 
-        <div style={{position:'relative',zIndex:1,flex:1,display:'flex',flexDirection:'column',padding:'44px 24px 36px',maxWidth:1080,margin:'0 auto',width:'100%'}}>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 400px',gap:60,alignItems:'center',flex:1}} className="two-col">
-            <div>
-              <div style={{display:'inline-flex',alignItems:'center',gap:7,background:'rgba(13,148,136,.1)',border:'1px solid rgba(13,148,136,.28)',borderRadius:24,padding:'5px 14px',fontSize:11,color:'var(--teal)',fontWeight:500,marginBottom:24}}>
-                <div className="dot" style={{color:'var(--teal)'}}/>
-                Willoughby market data — updated Oct 2025
-              </div>
-              <h1 style={{fontFamily:'Georgia,serif',fontSize:'clamp(32px,4.8vw,54px)',fontWeight:800,lineHeight:1.08,marginBottom:16,letterSpacing:'-.4px'}}>
-                Before you call<br/>a realtor,<br/><span style={{color:'var(--gold2)'}}>know your number.</span>
-              </h1>
-              <p style={{fontSize:16,color:'var(--lgray)',lineHeight:1.7,marginBottom:20,maxWidth:500}}>
-                Your home&apos;s real value isn&apos;t on your BC Assessment notice. Enter your address and get an accurate estimate in <strong style={{color:'#fff'}}>30 seconds</strong> — based on actual sales data from your street.
-              </p>
-              <div style={{display:'flex',flexDirection:'column',gap:10,marginTop:20}}>
-                <input className="inp inp-dark" type="text" placeholder="e.g. 201B St, Willoughby, Langley BC" value={address} onChange={e=>setAddress(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submitG1()}/>
-                <button className="btn btn-teal" onClick={submitG1}>
-                  Get my home&apos;s value →
-                </button>
-                <p style={{fontSize:11,color:'var(--gray)',textAlign:'center'}}>Free — no account needed — instant results</p>
-              </div>
-            </div>
-            <div style={{display:'flex',flexDirection:'column',gap:14}}>
-              <div className="stat-card" style={{borderTopColor:'var(--teal)'}}>
-                <div style={{fontFamily:'Georgia,serif',fontSize:36,fontWeight:700,marginBottom:4,color:'var(--gold2)'}}>$468</div>
-                <div style={{fontSize:12,color:'var(--lgray)'}}>avg $/sqft — recent Willoughby sales</div>
-              </div>
-              <div className="stat-card" style={{borderTopColor:'var(--gold2)'}}>
-                <div style={{fontFamily:'Georgia,serif',fontSize:36,fontWeight:700,marginBottom:4,color:'#fff'}}>28 days</div>
-                <div style={{fontSize:12,color:'var(--lgray)'}}>avg days on market — homes are moving</div>
-              </div>
-              <div className="stat-card" style={{borderTopColor:'#16a34a'}}>
-                <div style={{fontFamily:'Georgia,serif',fontSize:36,fontWeight:700,marginBottom:4,color:'var(--teal)'}}>+$111K</div>
-                <div style={{fontSize:12,color:'var(--lgray)'}}>avg above BCA assessed — 2 of 3 homes</div>
-              </div>
-            </div>
-          </div>
-          <div style={{paddingTop:32,borderTop:'1px solid rgba(255,255,255,.06)',fontSize:11,color:'var(--gray)',display:'flex',justifyContent:'space-between',flexWrap:'wrap',gap:6,marginTop:32}}>
-            <span>Based on 3 verified MLS transactions · Willoughby, Sept–Oct 2025</span>
-            <span>Powered by Kamran Khan, REALTOR® · Royal Lepage Global Force Realty</span>
-          </div>
-        </div>
-      </main>
-
-      {/* ═══ GATE 2 ═══ */}
-      <main style={{display: gate==='gate2'?'flex':'none', flexDirection:'column', minHeight:'100vh', background:'var(--navy)', paddingTop:40}}>
-        <nav className="topnav"><div className="logo" onClick={()=>setGate('gate1')}>EquityReady</div><div style={{fontSize:12,color:'var(--lgray)'}}>Step 1 of 2</div></nav>
-        <div style={{flex:1,padding:'36px 24px',maxWidth:700,margin:'0 auto',width:'100%'}}>
-          <div style={{display:'inline-flex',alignItems:'center',gap:9,background:'rgba(13,148,136,.09)',border:'1px solid rgba(13,148,136,.22)',borderRadius:24,padding:'9px 16px',fontSize:12,color:'var(--teal)',fontWeight:500,marginBottom:24}}>
-            <div className="dot" style={{color:'var(--teal)'}}/>
-            Property detected: <strong style={{marginLeft:4}}>{address || '123 Willoughby St'}</strong>
-          </div>
-          <h2 style={{fontFamily:'Georgia,serif',fontSize:26,fontWeight:700,marginBottom:7}}>We found your property</h2>
-          <p style={{color:'var(--lgray)',fontSize:14,marginBottom:22,lineHeight:1.6}}>Your estimate is ready. Enter your name and phone to unlock it.</p>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12,marginBottom:24}} className="three-col">
-            <div className="g2-card">
-              <div style={{fontSize:10,color:'var(--lgray)',textTransform:'uppercase',letterSpacing:'.7px',marginBottom:8,fontWeight:500}}>BCA Assessed</div>
-              <div style={{fontFamily:'Georgia,serif',fontSize:22,fontWeight:700}}>$1,439,000</div>
-              <div style={{fontSize:10,color:'var(--lgray)',marginTop:5}}>your notice figure</div>
-            </div>
-            <div className="g2-card">
-              <div className="lock-ov">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--gold2)" strokeWidth="2"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-                <span style={{fontSize:9,textTransform:'uppercase',letterSpacing:1,color:'rgba(255,255,255,.55)',fontWeight:600}}>Locked</span>
-              </div>
-              <div className="blur-val">
-                <div style={{fontSize:10,color:'var(--lgray)',textTransform:'uppercase',letterSpacing:'.7px',marginBottom:8,fontWeight:500}}>Market Estimate</div>
-                <div style={{fontFamily:'Georgia,serif',fontSize:22,fontWeight:700}}>$1,522,000</div>
-              </div>
-            </div>
-            <div className="g2-card">
-              <div className="lock-ov">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--gold2)" strokeWidth="2"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-                <span style={{fontSize:9,textTransform:'uppercase',letterSpacing:1,color:'rgba(255,255,255,.55)',fontWeight:600}}>Locked</span>
-              </div>
-              <div className="blur-val">
-                <div style={{fontSize:10,color:'var(--lgray)',textTransform:'uppercase',letterSpacing:'.7px',marginBottom:8,fontWeight:500}}>Est. Net In Hand</div>
-                <div style={{fontFamily:'Georgia,serif',fontSize:22,fontWeight:700}}>$1,408,000</div>
-              </div>
-            </div>
-          </div>
-          <div style={{background:'#fff',borderRadius:14,padding:26}}>
-            <div style={{fontSize:17,fontWeight:700,color:'var(--navy)',marginBottom:5}}>Unlock your full estimate</div>
-            <div style={{fontSize:13,color:'var(--gray)',marginBottom:18}}>No spam. No pressure. Used only to prepare your personalized report.</div>
-            <div style={{display:'flex',flexDirection:'column',gap:10}}>
-              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}} className="two-col">
-                <input className="inp" type="text" placeholder="First name" value={name} onChange={e=>setName(e.target.value)}/>
-                <input className="inp" type="tel" placeholder="Phone number" value={phone} onChange={e=>setPhone(e.target.value)}/>
-              </div>
-              <button className="btn btn-navy" onClick={submitG2} disabled={loadingUnlock}>
-                {loadingUnlock ? 'Unlocking...' : 'Unlock my estimate →'}
+            {/* Address search */}
+            <div style={{ maxWidth: 560, margin: '0 auto', display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+              <input
+                ref={addressInputRef}
+                value={address}
+                onChange={e => setAddress(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleAddressSubmit()}
+                placeholder="Start typing your address..."
+                style={{
+                  flex: 1, minWidth: 260, padding: '16px 20px', fontSize: 16,
+                  border: '2px solid #1E3A5F', borderRadius: 10, background: '#0D1F3C',
+                  color: '#fff', outline: 'none',
+                }}
+              />
+              <button
+                onClick={handleAddressSubmit}
+                disabled={loading || !address.trim()}
+                style={{
+                  padding: '16px 28px', background: loading ? '#666' : '#0D9488',
+                  color: '#fff', fontWeight: 700, fontSize: 16, border: 'none',
+                  borderRadius: 10, cursor: loading ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
+                }}
+              >
+                {loading ? 'Checking...' : 'See my estimate →'}
               </button>
-              <p style={{fontSize:11,color:'var(--gray)',textAlign:'center'}}>We will never share your information. Ever.</p>
+            </div>
+            <p style={{ color: '#4A6080', fontSize: 13, marginTop: 12 }}>
+              No sign-up required to see your market range
+            </p>
+          </div>
+
+          {/* Stats bar */}
+          <div style={{ background: '#fff', borderBottom: '1px solid #E2E8F0' }}>
+            <div style={{ maxWidth: 800, margin: '0 auto', display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: 0 }}>
+              {[
+                { val: '$468', label: 'avg $/sqft sold', accent: '#0D9488' },
+                { val: '28 days', label: 'avg days on market', accent: '#C8952A' },
+                { val: '+$111,500', label: 'avg above BCA', accent: '#166534' },
+              ].map((s, i) => (
+                <div key={i} style={{ flex: '1 1 180px', padding: '28px 24px', textAlign: 'center', borderRight: i < 2 ? '1px solid #E2E8F0' : 'none' }}>
+                  <div style={{ fontSize: 28, fontWeight: 800, color: s.accent }}>{s.val}</div>
+                  <div style={{ fontSize: 13, color: '#64748B', marginTop: 4 }}>{s.label}</div>
+                </div>
+              ))}
+            </div>
+            <p style={{ textAlign: 'center', color: '#94A3B8', fontSize: 11, padding: '8px 0 16px' }}>
+              Based on 3 verified MLS transactions in Willoughby, Sept–Oct 2025
+            </p>
+          </div>
+
+          {/* Why EquityReady */}
+          <div style={{ maxWidth: 860, margin: '60px auto', padding: '0 24px' }}>
+            <h2 style={{ textAlign: 'center', fontSize: 26, fontWeight: 700, marginBottom: 40 }}>
+              What you get — for free, in seconds
+            </h2>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 20 }}>
+              {[
+                { icon: '📊', title: 'Your real market range', body: 'Based on actual $/sqft from recent Willoughby sales — not BCA.' },
+                { icon: '💰', title: 'Your equity position', body: 'What you paid, what it\'s worth, and the tax-free gain in your hands.' },
+                { icon: '🏡', title: 'Renovation value impact', body: 'Tick what you\'ve upgraded and see how buyers price it in.' },
+                { icon: '📋', title: 'Net-in-pocket estimate', body: 'What you\'d actually walk away with after all costs — your real number.' },
+              ].map((c, i) => (
+                <div key={i} style={{ background: '#fff', border: '1px solid #E2E8F0', borderRadius: 12, padding: '24px 20px' }}>
+                  <div style={{ fontSize: 28, marginBottom: 12 }}>{c.icon}</div>
+                  <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 8 }}>{c.title}</div>
+                  <div style={{ color: '#64748B', fontSize: 14, lineHeight: 1.6 }}>{c.body}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Footer */}
+          <footer style={{ background: '#0A1628', color: '#64748B', textAlign: 'center', padding: '32px 24px', fontSize: 13 }}>
+            <p style={{ color: '#94A3B8', marginBottom: 8 }}>
+              Powered by <strong style={{ color: '#C8952A' }}>Kamran Khan</strong>, REALTOR® · Royal Lepage Global Force Realty
+            </p>
+            <p>+1-236-660-2594 · Realtormkamran@gmail.com</p>
+            <p style={{ marginTop: 12 }}>
+              <a href="/privacy" style={{ color: '#4A6080', textDecoration: 'underline' }}>Privacy Policy</a>
+            </p>
+          </footer>
+        </div>
+      )}
+
+      {/* ── GATE 2 ── */}
+      {gate === 2 && (
+        <div style={{ maxWidth: 640, margin: '48px auto', padding: '0 16px' }}>
+          <div style={{ background: '#fff', borderRadius: 16, border: '1px solid #E2E8F0', overflow: 'hidden' }}>
+            {/* Header */}
+            <div style={{ background: '#0A1628', padding: '24px 28px' }}>
+              <p style={{ color: '#C8952A', fontSize: 12, fontWeight: 600, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6 }}>
+                Property detected
+              </p>
+              <p style={{ color: '#fff', fontWeight: 700, fontSize: 18 }}>{lead.address || address}</p>
+              <p style={{ color: '#64748B', fontSize: 13, marginTop: 4 }}>Willoughby · Original build</p>
+            </div>
+
+            <div style={{ padding: '28px' }}>
+              {/* Blurred cards */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 28 }}>
+                {/* BCA — not blurred */}
+                <div style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 10, padding: 16, textAlign: 'center' }}>
+                  <div style={{ color: '#64748B', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>BCA Assessed</div>
+                  <div style={{ fontWeight: 800, fontSize: 20, color: '#0F2B5B' }}>
+                    {bcaData ? fmt(bcaData.assessedTotal) : '$1,439,000'}
+                  </div>
+                  <div style={{ color: '#94A3B8', fontSize: 12, marginTop: 4 }}>Official assessment</div>
+                </div>
+                {/* Market estimate — blurred */}
+                <div style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 10, padding: 16, textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
+                  <div style={{ color: '#64748B', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Market Estimate</div>
+                  <div style={{ fontWeight: 800, fontSize: 18, color: '#0F2B5B', filter: 'blur(7px)', userSelect: 'none' }}>
+                    {bcaData ? fmt(bcaData.estimateLow) : '$1,353,000'}
+                  </div>
+                  <div style={{ color: '#94A3B8', fontSize: 12, marginTop: 4, filter: 'blur(5px)', userSelect: 'none' }}>Based on $/sqft</div>
+                  <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <span style={{ fontSize: 20 }}>🔒</span>
+                  </div>
+                </div>
+                {/* Equity — blurred */}
+                <div style={{ background: '#FEF9EC', border: '1px solid #C8952A', borderRadius: 10, padding: 16, textAlign: 'center', position: 'relative', overflow: 'hidden' }}>
+                  <div style={{ color: '#92600A', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Equity Gained</div>
+                  <div style={{ fontWeight: 800, fontSize: 18, color: '#C8952A', filter: 'blur(7px)', userSelect: 'none' }}>
+                    {bcaData ? fmt(bcaData.equityGain) : '$1,096,206'}
+                  </div>
+                  <div style={{ color: '#92600A', fontSize: 12, marginTop: 4, filter: 'blur(5px)', userSelect: 'none' }}>Tax-free</div>
+                  <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <span style={{ fontSize: 20 }}>🔒</span>
+                  </div>
+                </div>
+              </div>
+
+              <p style={{ textAlign: 'center', color: '#64748B', fontSize: 14, marginBottom: 24 }}>
+                Enter your name and phone to unlock your full estimate
+              </p>
+
+              {/* Unlock form */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <input
+                  value={lead.name}
+                  onChange={e => setLead(p => ({ ...p, name: e.target.value }))}
+                  placeholder="Your first name"
+                  style={{ padding: '14px 16px', border: '1.5px solid #CBD5E1', borderRadius: 8, fontSize: 16, outline: 'none' }}
+                />
+                <div>
+                  <input
+                    value={lead.phone}
+                    onChange={e => {
+                      const formatted = formatPhone(e.target.value)
+                      setLead(p => ({ ...p, phone: formatted }))
+                      if (phoneError) setPhoneError('')
+                    }}
+                    placeholder="Phone number (e.g. 604-555-0123)"
+                    type="tel"
+                    style={{
+                      width: '100%', padding: '14px 16px', border: `1.5px solid ${phoneError ? '#EF4444' : '#CBD5E1'}`,
+                      borderRadius: 8, fontSize: 16, outline: 'none', boxSizing: 'border-box',
+                    }}
+                  />
+                  {phoneError && <p style={{ color: '#EF4444', fontSize: 13, marginTop: 6 }}>{phoneError}</p>}
+                </div>
+                <button
+                  onClick={handleUnlock}
+                  disabled={loading || !lead.name.trim() || lead.name.trim().length < 2}
+                  style={{
+                    padding: '16px', background: loading ? '#94A3B8' : '#0D9488',
+                    color: '#fff', fontWeight: 700, fontSize: 16, border: 'none',
+                    borderRadius: 10, cursor: loading ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  {loading ? 'Preparing your report...' : 'Unlock my estimate →'}
+                </button>
+                <p style={{ textAlign: 'center', color: '#94A3B8', fontSize: 12 }}>
+                  No spam. No pressure. Your details are used only to prepare your personalized report.
+                </p>
+              </div>
             </div>
           </div>
         </div>
-      </main>
+      )}
 
-      {/* ═══ GATE 3 — REPORT ═══ */}
-      <main style={{display: gate==='gate3'?'flex':'none', flexDirection:'column', minHeight:'100vh', background:'var(--off)', paddingTop:40}}>
-        <nav className="topnav" style={{background:'var(--navy)'}}><div className="logo" onClick={()=>setGate('gate1')}>EquityReady</div><div style={{fontSize:12,color:'var(--lgray)'}}>Your personalized report</div></nav>
-        <div style={{flex:1,display:'grid',gridTemplateColumns:'1fr 320px',gap:20,padding:'24px',maxWidth:1080,margin:'0 auto',width:'100%',alignItems:'start'}} className="two-col">
-          <div style={{display:'flex',flexDirection:'column',gap:16}}>
+      {/* ── GATE 3 ── */}
+      {gate === 3 && (
+        <div style={{ maxWidth: 1100, margin: '0 auto', padding: '32px 16px', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: 24, alignItems: 'start' }}>
 
-            {/* Equity numbers */}
-            <div className="card">
-              <div className="card-header">
-                <h3>Equity report — <span style={{color:'var(--teal)'}}>{address}</span></h3>
-                <span style={{fontSize:11,color:'var(--gray)'}}>Willoughby · 2004 build</span>
+          {/* LEFT — Report */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+            {/* Header card */}
+            <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #E2E8F0', overflow: 'hidden' }}>
+              <div style={{ background: '#0A1628', padding: '20px 28px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                <div>
+                  <p style={{ color: '#C8952A', fontSize: 12, fontWeight: 600, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 4 }}>Equity report</p>
+                  <p style={{ color: '#fff', fontWeight: 700, fontSize: 17 }}>{lead.address}</p>
+                </div>
+                <span style={{ color: '#64748B', fontSize: 13 }}>Willoughby · {bcaData ? new Date(bcaData.purchaseDate).getFullYear() : '2004'} build</span>
               </div>
-              <div className="card-body">
-                <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10,marginBottom:16}} className="three-col">
-                  <div style={{background:'var(--off)',borderRadius:12,padding:14,border:'1px solid var(--border)',textAlign:'center'}}>
-                    <div style={{fontSize:9,color:'var(--gray)',textTransform:'uppercase',letterSpacing:'.6px',fontWeight:600,marginBottom:5}}>Purchased for</div>
-                    <div style={{fontFamily:'Georgia,serif',fontSize:18,fontWeight:700,color:'var(--navy)'}}>$342,794</div>
-                    <div style={{fontSize:10,color:'var(--gray)',marginTop:3}}>April 2004 · 22 yrs ago</div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', padding: '0' }}>
+                {[
+                  { label: 'Purchased for', val: bcaData ? fmt(bcaData.purchasePrice) : '$342,794', sub: bcaData ? `${new Date(bcaData.purchaseDate).toLocaleDateString('en-CA',{month:'long',year:'numeric'})} · ${Math.round(bcaData.yearsOwned)} yrs ago` : 'April 2004 · 22 yrs ago', gold: false },
+                  { label: 'Market estimate', val: bcaData ? `${fmt(bcaData.estimateLow)}–` : '$1,353,000–', sub: bcaData ? `${fmt(bcaData.estimateHigh)}` : '$1,443,000', gold: false, sub2: 'at $451–$481/sqft' },
+                  { label: 'Equity gained', val: bcaData ? `${fmt(bcaData.equityGain)}+` : '$1,096,206+', sub: bcaData ? `${bcaData.equityMultiple}x · 100% tax-free` : '4.2x · 100% tax-free', gold: true },
+                ].map((c, i) => (
+                  <div key={i} style={{ padding: '20px 24px', borderRight: i < 2 ? '1px solid #E2E8F0' : 'none', background: c.gold ? '#FEF9EC' : '#fff' }}>
+                    <div style={{ color: '#64748B', fontSize: 11, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>{c.label}</div>
+                    <div style={{ fontWeight: 800, fontSize: 22, color: c.gold ? '#C8952A' : '#0F2B5B' }}>{c.val}</div>
+                    <div style={{ color: c.gold ? '#92600A' : '#64748B', fontSize: 13, marginTop: 4 }}>{c.sub}</div>
+                    {c.sub2 && <div style={{ color: '#94A3B8', fontSize: 12, marginTop: 2 }}>{c.sub2}</div>}
                   </div>
-                  <div style={{background:'var(--off)',borderRadius:12,padding:14,border:'1px solid var(--border)',textAlign:'center'}}>
-                    <div style={{fontSize:9,color:'var(--gray)',textTransform:'uppercase',letterSpacing:'.6px',fontWeight:600,marginBottom:5}}>Market estimate</div>
-                    <div style={{fontFamily:'Georgia,serif',fontSize:15,fontWeight:700,color:'var(--navy)'}}>$1,353,000–$1,443,000</div>
-                    <div style={{fontSize:10,color:'var(--gray)',marginTop:3}}>at $451–$481/sqft</div>
+                ))}
+              </div>
+            </div>
+
+            {/* Narrative */}
+            <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #E2E8F0', padding: '24px 28px' }}>
+              <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16, color: '#0A1628' }}>Market analysis</h3>
+              {narrative
+                ? <p style={{ color: '#334155', lineHeight: 1.8, fontSize: 15 }}>{narrative}</p>
+                : <div style={{ background: '#F1F5F9', borderRadius: 8, padding: 20, color: '#64748B', fontSize: 14 }}>
+                    Preparing your personalized analysis...
                   </div>
-                  <div style={{background:'var(--gold-bg)',borderRadius:12,padding:14,border:'1px solid var(--gold-border)',textAlign:'center'}}>
-                    <div style={{fontSize:9,color:'var(--gold)',textTransform:'uppercase',letterSpacing:'.6px',fontWeight:600,marginBottom:5}}>Equity gained</div>
-                    <div style={{fontFamily:'Georgia,serif',fontSize:18,fontWeight:700,color:'var(--gold)'}}>$1,096,206+</div>
-                    <div style={{fontSize:10,color:'var(--gold)',fontWeight:600,marginTop:3}}>4.2x · 100% tax-free</div>
-                  </div>
-                </div>
-                <div style={{background:'#EFF6FF',border:'1px solid #BFDBFE',borderRadius:8,padding:'10px 14px',fontSize:12,color:'#1D4ED8',marginBottom:12,display:'flex',alignItems:'center',gap:7}}>
-                  <div className="dot" style={{color:'#3B82F6'}}/>
-                  {loadingNarrative ? 'Reviewing recent sales on your street...' : 'Market analysis ready'}
-                </div>
-                <p style={{fontSize:13,color:'var(--gray)',lineHeight:1.75}}>
-                  {narrative || 'Your home is in one of Willoughby\'s most established neighbourhoods, built in 2004. Three comparable detached homes sold between September and October 2025 at an average of $468 per square foot — with two of three selling above their BC Assessment by an average of $111,500. Your assessment is not your ceiling. For most homes in this area it has been the floor.'}
+              }
+            </div>
+
+            {/* Comps table */}
+            <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #E2E8F0', padding: '24px 28px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <h3 style={{ fontSize: 16, fontWeight: 700, color: '#0A1628' }}>Comparable sales — Sept–Oct 2025</h3>
+                <span style={{ color: '#94A3B8', fontSize: 12 }}>MLS sold data</span>
+              </div>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
+                  <thead>
+                    <tr style={{ borderBottom: '2px solid #E2E8F0' }}>
+                      {['Street', 'Sold', 'BCA Assessed', 'Actual Sold', 'vs BCA', 'Days'].map(h => (
+                        <th key={h} style={{ padding: '10px 12px', textAlign: 'left', color: '#64748B', fontWeight: 600, fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.5 }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {COMPS.map((c, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid #F1F5F9' }}>
+                        <td style={{ padding: '14px 12px', fontWeight: 500 }}>{c.street}</td>
+                        <td style={{ padding: '14px 12px', color: '#64748B' }}>{c.sold}</td>
+                        <td style={{ padding: '14px 12px', color: '#64748B' }}>{c.bca}</td>
+                        <td style={{ padding: '14px 12px', fontWeight: 600 }}>{c.actual}</td>
+                        <td style={{ padding: '14px 12px', fontWeight: 700, color: c.positive ? '#166534' : '#64748B' }}>{c.vsBca}</td>
+                        <td style={{ padding: '14px 12px', color: '#64748B' }}>{c.days}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ marginTop: 16, padding: '14px 16px', background: '#FEF9EC', borderRadius: 8, border: '1px solid #C8952A' }}>
+                <p style={{ color: '#92600A', fontSize: 13, fontWeight: 600 }}>
+                  2 of 3 homes sold <strong>above BCA</strong> by avg $111,500 · $451–$481/sqft · Avg {MARKET.avgDOM} days on market
                 </p>
               </div>
             </div>
 
-            {/* Comp table */}
-            <div className="card">
-              <div className="card-header"><h3>Comparable sales — Sept–Oct 2025</h3><span style={{fontSize:11,color:'var(--gray)'}}>MLS sold data</span></div>
-              <div style={{overflowX:'auto'}}>
-                <table style={{width:'100%',borderCollapse:'collapse',fontSize:12}}>
-                  <thead><tr style={{background:'var(--off)'}}>
-                    {['Street','Sold','BCA Assessed','Actual Sold','vs BCA','Days'].map(h=><th key={h} style={{textAlign:'left',padding:'9px 12px',fontSize:10,fontWeight:600,color:'var(--gray)',textTransform:'uppercase',letterSpacing:'.4px',borderBottom:'1px solid var(--border)'}}>{h}</th>)}
-                  </tr></thead>
-                  <tbody>
-                    <tr><td style={{padding:'11px 12px',borderBottom:'1px solid var(--border)',color:'var(--navy)',fontWeight:500}}>69A Ave, Willoughby</td><td style={{padding:'11px 12px',borderBottom:'1px solid var(--border)',color:'var(--navy)'}}>Sep 2025</td><td style={{padding:'11px 12px',borderBottom:'1px solid var(--border)',color:'var(--navy)'}}>$1,543,000</td><td style={{padding:'11px 12px',borderBottom:'1px solid var(--border)',color:'var(--navy)',fontWeight:600}}>$1,650,000</td><td className="above" style={{padding:'11px 12px',borderBottom:'1px solid var(--border)'}}>+$107,000</td><td style={{padding:'11px 12px',borderBottom:'1px solid var(--border)',color:'var(--navy)'}}>19</td></tr>
-                    <tr><td style={{padding:'11px 12px',borderBottom:'1px solid var(--border)',color:'var(--navy)',fontWeight:500}}>69 Ave, Willoughby</td><td style={{padding:'11px 12px',borderBottom:'1px solid var(--border)',color:'var(--navy)'}}>Sep 2025</td><td style={{padding:'11px 12px',borderBottom:'1px solid var(--border)',color:'var(--navy)'}}>$1,486,000</td><td style={{padding:'11px 12px',borderBottom:'1px solid var(--border)',color:'var(--navy)',fontWeight:600}}>$1,480,000</td><td style={{padding:'11px 12px',borderBottom:'1px solid var(--border)',color:'var(--gray)'}}>at assessed</td><td style={{padding:'11px 12px',borderBottom:'1px solid var(--border)',color:'var(--navy)'}}>28</td></tr>
-                    <tr><td style={{padding:'11px 12px',color:'var(--navy)',fontWeight:500}}>70A Ave, Willoughby</td><td style={{padding:'11px 12px',color:'var(--navy)'}}>Oct 2025</td><td style={{padding:'11px 12px',color:'var(--navy)'}}>$1,239,000</td><td style={{padding:'11px 12px',color:'var(--navy)',fontWeight:600}}>$1,355,000</td><td className="above" style={{padding:'11px 12px'}}>+$116,000</td><td style={{padding:'11px 12px',color:'var(--navy)'}}>38</td></tr>
-                  </tbody>
-                </table>
-              </div>
-              <div style={{padding:'12px 16px',background:'var(--gold-bg)',borderTop:'1px solid var(--gold-border)',fontSize:12,color:'var(--gold)',fontWeight:500}}>
-                2 of 3 homes sold <strong>above</strong> BCA by avg $111,500 · $451–$481/sqft · Avg 28 days on market
-              </div>
-            </div>
-
-            {/* Reno calculator */}
-            <div className="card">
-              <div className="card-header"><h3>Renovation value calculator</h3><span style={{fontSize:11,background:'#FEF3C7',color:'#92400E',padding:'2px 8px',borderRadius:16,fontWeight:600}}>Refine your estimate</span></div>
-              <div className="card-body">
-                <p style={{fontSize:13,color:'var(--gray)',lineHeight:1.7,marginBottom:14}}>Have you renovated? Select what applies and we&apos;ll adjust your estimated range.</p>
-                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:12}} className="two-col">
-                  {RENOS.map((r,i)=>(
-                    <label key={i} className={`reno-check${renoChecked[i]?' sel':''}`} onClick={()=>toggleReno(i)}>
-                      <input type="checkbox" checked={renoChecked[i]} onChange={()=>toggleReno(i)} style={{accentColor:'var(--teal)',flexShrink:0,marginTop:2}}/>
-                      <div>
-                        <div style={{fontSize:12,fontWeight:600,color:'var(--navy)',marginBottom:1}}>{r.label}</div>
-                        <div style={{fontSize:11,color:'var(--green)',fontWeight:500}}>+{fmt(r.low)}–{fmt(r.high)}</div>
-                      </div>
-                    </label>
-                  ))}
-                </div>
-                {renoCount > 0 && (
-                  <div style={{background:'var(--gold-bg)',border:'1px solid var(--gold-border)',borderRadius:10,padding:'14px 16px'}}>
-                    <div style={{fontSize:12,fontWeight:600,color:'var(--gold)',marginBottom:4}}>Updated estimate based on your renovations</div>
-                    <div style={{fontFamily:'Georgia,serif',fontSize:22,fontWeight:700,color:'var(--navy)'}}>{fmt(renoLow)} – {fmt(renoHigh)}</div>
-                    <div style={{fontSize:11,color:'var(--gray)',marginTop:4}}>Renovation premium: <span style={{color:'var(--green)',fontWeight:600}}>+{fmt(renoTotLow)} – +{fmt(renoTotHigh)}</span></div>
-                    <div style={{fontSize:11,color:'var(--gray)',marginTop:8,fontStyle:'italic'}}>Estimated market adjustments — not a formal appraisal.</div>
-                  </div>
+            {/* Renovation calculator */}
+            <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #E2E8F0', padding: '24px 28px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                <h3 style={{ fontSize: 16, fontWeight: 700, color: '#0A1628' }}>Renovation value calculator</h3>
+                {checkedRenos.length > 0 && (
+                  <span style={{ background: '#0D9488', color: '#fff', fontSize: 12, fontWeight: 600, padding: '4px 10px', borderRadius: 20 }}>
+                    +{fmt(renoAddLow)}–{fmt(renoAddHigh)}
+                  </span>
                 )}
               </div>
+              <p style={{ color: '#64748B', fontSize: 14, marginBottom: 20 }}>
+                Have you renovated? Select what applies and we'll adjust your estimated range.
+              </p>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
+                {RENOS.map(r => (
+                  <label key={r.id} style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 10, padding: '14px 16px',
+                    border: `1.5px solid ${checkedRenos.includes(r.id) ? '#0D9488' : '#E2E8F0'}`,
+                    borderRadius: 10, cursor: 'pointer',
+                    background: checkedRenos.includes(r.id) ? '#F0FDFA' : '#FAFAFA',
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={checkedRenos.includes(r.id)}
+                      onChange={e => setCheckedRenos(prev => e.target.checked ? [...prev, r.id] : prev.filter(x => x !== r.id))}
+                      style={{ marginTop: 2, accentColor: '#0D9488', width: 16, height: 16, flexShrink: 0 }}
+                    />
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: 14 }}>{r.label}</div>
+                      <div style={{ color: '#0D9488', fontSize: 13, marginTop: 2 }}>{r.sub}</div>
+                    </div>
+                  </label>
+                ))}
+              </div>
+              {checkedRenos.length > 0 && (
+                <div style={{ marginTop: 20, padding: '16px 20px', background: '#F0FDFA', borderRadius: 10, border: '1px solid #0D9488' }}>
+                  <p style={{ color: '#0A1628', fontWeight: 700, fontSize: 15 }}>
+                    Renovation-adjusted estimate: {fmt(adjLow)} – {fmt(adjHigh)}
+                  </p>
+                  <p style={{ color: '#64748B', fontSize: 13, marginTop: 4 }}>
+                    Buyer premium for your upgrades: +{fmt(renoAddLow)}–{fmt(renoAddHigh)} above base estimate
+                  </p>
+                </div>
+              )}
             </div>
 
-            {/* Move costs */}
-            <div className="card">
-              <div className="card-header"><h3>The real cost of moving</h3><span style={{fontSize:11,background:'var(--off)',color:'var(--gray)',padding:'2px 8px',borderRadius:16,fontWeight:600}}>Transparency</span></div>
-              <div className="card-body">
-                {[['Legal / notary fees','$1,800 – $2,500'],['Moving costs (local)','$2,000 – $4,000'],['Home preparation / staging','$1,500 – $3,000'],['Bridge financing (if needed)','~$2,000 – $4,000']].map(([l,v])=>(
-                  <div key={l} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'9px 0',borderBottom:'1px solid var(--border)',fontSize:13}}>
-                    <span style={{color:'var(--gray)'}}>{l}</span><span style={{fontWeight:600,color:'var(--navy)'}}>{v}</span>
+            {/* Move cost breakdown */}
+            <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #E2E8F0', padding: '24px 28px' }}>
+              <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 16, color: '#0A1628' }}>The real cost of moving</h3>
+              <p style={{ color: '#64748B', fontSize: 14, marginBottom: 16, lineHeight: 1.7 }}>
+                Most original owners assume moving is expensive and disruptive. Here's the realistic math on a {bcaData ? fmt(Math.round((bcaData.estimateLow + bcaData.estimateHigh)/2)) : '$1,400,000'} sale:
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {[
+                  { label: 'Legal / notary fees', val: '$1,800–$2,500' },
+                  { label: 'Moving costs (local)', val: '$2,000–$4,000' },
+                  { label: 'Realtor commission', val: '~$35,000–$42,000' },
+                  { label: 'Staging (optional)', val: '$3,000–$6,000' },
+                ].map((row, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderBottom: '1px solid #F1F5F9' }}>
+                    <span style={{ color: '#334155', fontSize: 14 }}>{row.label}</span>
+                    <span style={{ fontWeight: 600, fontSize: 14 }}>{row.val}</span>
                   </div>
                 ))}
-                <div style={{background:'var(--gold-bg)',borderRadius:8,padding:'12px 14px',marginTop:10,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                  <div><div style={{fontSize:13,fontWeight:600,color:'var(--gold)'}}>As % of your estimated net proceeds</div><div style={{fontSize:11,color:'var(--gray)'}}>On an estimated net of ~$1.1M</div></div>
-                  <div style={{fontFamily:'Georgia,serif',fontSize:18,fontWeight:700,color:'var(--gold)'}}>less than 1.3%</div>
-                </div>
+              </div>
+              <div style={{ marginTop: 16, padding: '14px 16px', background: '#F0FDF4', borderRadius: 8, border: '1px solid #166534' }}>
+                <p style={{ color: '#166534', fontSize: 13, fontWeight: 600 }}>
+                  Total transition costs represent less than 3% of your estimated net proceeds — far less than most owners expect.
+                </p>
               </div>
             </div>
 
             {/* Timeline */}
-            <div className="card">
-              <div className="card-header"><h3>What happens if you decide to list</h3></div>
-              <div className="card-body">
-                {[['Week 1','Prepare the home','Photos, staging consultation, pricing strategy finalized.'],['Week 2','Live on MLS','Open house weekend. Active buyer agents notified. Showings begin.'],['Week 3–4','Offers and negotiation','Review offers, negotiate terms, accept. Subject removal follows.'],['Day 30–60','Completion','Keys change hands. Proceeds arrive in your account. Done.']].map(([w,t,d])=>(
-                  <div key={w} style={{display:'grid',gridTemplateColumns:'80px 1fr',gap:12,alignItems:'start',marginBottom:4}}>
-                    <div style={{textAlign:'right',paddingTop:3,fontSize:11,fontWeight:600,color:'var(--teal)'}}>{w}</div>
-                    <div className="tl-right">
-                      <div style={{fontSize:13,fontWeight:600,color:'var(--navy)',marginBottom:2}}>{t}</div>
-                      <div style={{fontSize:12,color:'var(--gray)',lineHeight:1.5}}>{d}</div>
+            <div style={{ background: '#fff', borderRadius: 14, border: '1px solid #E2E8F0', padding: '24px 28px' }}>
+              <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 20, color: '#0A1628' }}>What happens if you decide to list</h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+                {[
+                  { week: 'Week 1', title: 'Prepare & photograph', body: 'Staging consultation, professional photos, pricing strategy. Your home is ready before it goes live.' },
+                  { week: 'Week 2', title: 'Live on MLS', body: 'Open house weekend. Based on recent sales, qualified buyers are ready and actively looking.' },
+                  { week: 'Weeks 3–4', title: 'Offers & negotiation', body: 'Average homes in this area receive offers within 28 days. We negotiate the strongest terms.' },
+                  { week: 'Day 30–60', title: 'Completion', body: 'Keys handed over. Proceeds in your account. The process is complete — on your timeline.' },
+                ].map((step, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 20, paddingBottom: 20 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0 }}>
+                      <div style={{ width: 36, height: 36, borderRadius: '50%', background: '#0A1628', color: '#C8952A', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: 13, flexShrink: 0 }}>
+                        {i+1}
+                      </div>
+                      {i < 3 && <div style={{ width: 2, flex: 1, background: '#E2E8F0', margin: '6px 0' }} />}
+                    </div>
+                    <div style={{ paddingTop: 6 }}>
+                      <p style={{ color: '#C8952A', fontSize: 12, fontWeight: 600, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 4 }}>{step.week}</p>
+                      <p style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>{step.title}</p>
+                      <p style={{ color: '#64748B', fontSize: 14, lineHeight: 1.6 }}>{step.body}</p>
                     </div>
                   </div>
                 ))}
@@ -380,91 +622,166 @@ export default function Home() {
 
           </div>
 
-          {/* Sidebar */}
-          <div style={{display:'flex',flexDirection:'column',gap:14}}>
-            <div style={{background:'var(--green-bg)',border:'1px solid #86EFAC',borderRadius:13,padding:16}}>
-              <div style={{display:'flex',alignItems:'center',gap:7,fontWeight:600,color:'var(--green)',marginBottom:7,fontSize:13}}>
-                <div className="dot" style={{color:'var(--green)'}}/>Active buyer demand
+          {/* RIGHT — Sidebar */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16, position: 'sticky', top: 20 }}>
+
+            {/* Active demand */}
+            <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #E2E8F0', padding: '20px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#16A34A', display: 'inline-block' }} />
+                <span style={{ fontWeight: 700, fontSize: 14, color: '#0A1628' }}>Active buyer demand</span>
               </div>
-              <div style={{fontSize:12,color:'#166534',lineHeight:1.6}}>There is currently strong buyer demand in Willoughby for detached homes in the $1.3M–$1.6M range. I work with buyers actively looking in this area.</div>
+              <p style={{ color: '#334155', fontSize: 14, lineHeight: 1.6 }}>
+                There is currently strong buyer demand in Willoughby for detached homes in the $1.3M–$1.6M range. I work with buyers actively looking in this area.
+              </p>
             </div>
 
-            <div style={{background:'#fff',border:'1px solid var(--border)',borderRadius:13,padding:16}}>
-              <div style={{fontSize:13,fontWeight:600,color:'var(--navy)',marginBottom:10}}>Who is buying in Willoughby right now</div>
-              {['Families relocating from Metro Vancouver — pre-approved $1.3M–$1.6M','Looking for move-in ready — not planning renovations','Prioritize school catchment, suite income, and garage','Typically need 30–45 day completion timeline'].map(t=>(
-                <div key={t} style={{display:'flex',alignItems:'flex-start',gap:8,marginBottom:8,fontSize:12,color:'var(--gray)',lineHeight:1.5}}>
-                  <div style={{width:6,height:6,borderRadius:'50%',background:'var(--teal)',flexShrink:0,marginTop:4}}/>
-                  <span>{t}</span>
+            {/* Who is buying */}
+            <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #E2E8F0', padding: '20px' }}>
+              <h4 style={{ fontWeight: 700, fontSize: 14, marginBottom: 12, color: '#0A1628' }}>Who is buying in Willoughby right now</h4>
+              <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {[
+                  'Families relocating from Metro Vancouver — pre-approved $1.3M–$1.6M',
+                  'Looking for move-in ready — not planning renovations',
+                  'Prioritize school catchment, suite income, and garage',
+                  'Typically need 30–45 day completion timeline',
+                ].map((pt, i) => (
+                  <li key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                    <span style={{ color: '#0D9488', fontSize: 16, flexShrink: 0, marginTop: 1 }}>•</span>
+                    <span style={{ color: '#334155', fontSize: 13, lineHeight: 1.5 }}>{pt}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            {/* Supply warning */}
+            <div style={{ background: '#0A1628', borderRadius: 12, padding: '20px', border: '1px solid #1E3A5F' }}>
+              <p style={{ color: '#C8952A', fontWeight: 700, fontSize: 14, marginBottom: 8 }}>Right now supply is very limited</p>
+              <p style={{ color: '#94A3B8', fontSize: 13, lineHeight: 1.6 }}>
+                There are very few comparable detached homes available in Willoughby at this moment. Homeowners who list first in a low-supply market consistently capture the strongest offers.
+              </p>
+            </div>
+
+            {/* PDF email gate */}
+            <div style={{ background: '#fff', borderRadius: 12, border: '1px solid #E2E8F0', padding: '20px' }}>
+              <h4 style={{ fontWeight: 700, fontSize: 15, marginBottom: 6, color: '#0A1628' }}>Get the full report as a PDF</h4>
+              <p style={{ color: '#64748B', fontSize: 13, marginBottom: 16, lineHeight: 1.5 }}>
+                Includes your renovation-adjusted estimate, net-in-pocket number, full comp breakdown, and move cost calculator.
+              </p>
+              {emailSent ? (
+                <div style={{ background: '#F0FDF4', border: '1px solid #166534', borderRadius: 8, padding: '14px', textAlign: 'center' }}>
+                  <p style={{ color: '#166534', fontWeight: 700, fontSize: 14 }}>✓ Report sent! Check your inbox.</p>
+                </div>
+              ) : (
+                <>
+                  <input
+                    value={lead.email}
+                    onChange={e => setLead(p => ({ ...p, email: e.target.value }))}
+                    placeholder="your@email.com"
+                    type="email"
+                    style={{ width: '100%', padding: '12px 14px', border: '1.5px solid #CBD5E1', borderRadius: 8, fontSize: 15, marginBottom: 10, boxSizing: 'border-box', outline: 'none' }}
+                  />
+                  <button
+                    onClick={handleEmailReport}
+                    disabled={emailLoading || !lead.email.includes('@')}
+                    style={{
+                      width: '100%', padding: '14px', background: emailLoading ? '#94A3B8' : '#0D9488',
+                      color: '#fff', fontWeight: 700, fontSize: 15, border: 'none', borderRadius: 10,
+                      cursor: emailLoading ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    {emailLoading ? 'Sending...' : 'Email me the full report →'}
+                  </button>
+                  <p style={{ color: '#94A3B8', fontSize: 12, marginTop: 10, textAlign: 'center' }}>
+                    Kamran Khan will follow up personally within 24 hours
+                  </p>
+                </>
+              )}
+            </div>
+
+            {/* Book a call */}
+            <div style={{ background: '#FEF9EC', borderRadius: 12, border: '1px solid #C8952A', padding: '20px', textAlign: 'center' }}>
+              <p style={{ fontWeight: 700, fontSize: 15, color: '#0A1628', marginBottom: 6 }}>Prefer to talk now?</p>
+              <p style={{ color: '#64748B', fontSize: 13, marginBottom: 14 }}>15-minute call. No obligation. Just your real number.</p>
+              <a
+                href="tel:+12366602594"
+                style={{ display: 'block', padding: '12px', background: '#0A1628', color: '#fff', fontWeight: 700, fontSize: 14, borderRadius: 10, textDecoration: 'none' }}
+              >
+                Call +1-236-660-2594
+              </a>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* ── GATE 4 ── */}
+      {gate === 4 && (
+        <div style={{ maxWidth: 560, margin: '80px auto', padding: '0 16px', textAlign: 'center' }}>
+          <div style={{ background: '#fff', borderRadius: 16, border: '1px solid #E2E8F0', padding: '48px 40px' }}>
+            <div style={{ fontSize: 48, marginBottom: 20 }}>✅</div>
+            <h2 style={{ fontSize: 26, fontWeight: 800, marginBottom: 12, color: '#0A1628' }}>Your report is on its way</h2>
+            <p style={{ color: '#64748B', fontSize: 16, lineHeight: 1.7, marginBottom: 28 }}>
+              Check your inbox — your personalized Willoughby equity report is headed there now.<br /><br />
+              <strong style={{ color: '#0A1628' }}>Kamran Khan</strong> will follow up personally within 24 hours.
+            </p>
+            <div style={{ background: '#FEF9EC', border: '1px solid #C8952A', borderRadius: 10, padding: '20px', marginBottom: 24 }}>
+              <p style={{ fontWeight: 700, color: '#0A1628', marginBottom: 6 }}>Want to talk today?</p>
+              <p style={{ color: '#64748B', fontSize: 14, marginBottom: 14 }}>15 minutes. No pressure. Just your complete picture.</p>
+              <a href="tel:+12366602594" style={{ display: 'block', padding: '12px', background: '#0A1628', color: '#fff', fontWeight: 700, borderRadius: 10, textDecoration: 'none', fontSize: 15 }}>
+                Call +1-236-660-2594
+              </a>
+            </div>
+            <p style={{ color: '#94A3B8', fontSize: 13 }}>Royal Lepage Global Force Realty · Langley, BC</p>
+          </div>
+        </div>
+      )}
+
+      {/* ── CHAT WIDGET ── */}
+      <div style={{ position: 'fixed', bottom: 24, right: 24, zIndex: 1000 }}>
+        {chatOpen && (
+          <div style={{ width: 320, background: '#fff', borderRadius: 16, border: '1px solid #E2E8F0', boxShadow: '0 20px 60px rgba(0,0,0,0.15)', marginBottom: 12, overflow: 'hidden' }}>
+            <div style={{ background: '#0A1628', padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <p style={{ color: '#fff', fontWeight: 700, fontSize: 14, margin: 0 }}>Willoughby Home Value</p>
+                <p style={{ color: '#64748B', fontSize: 12, margin: 0 }}>Ask me anything</p>
+              </div>
+              <button onClick={() => setChatOpen(false)} style={{ background: 'none', border: 'none', color: '#64748B', cursor: 'pointer', fontSize: 18 }}>×</button>
+            </div>
+            <div style={{ height: 240, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {chatMessages.map((m, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                  <div style={{
+                    maxWidth: '80%', padding: '10px 14px', borderRadius: 12, fontSize: 13, lineHeight: 1.5,
+                    background: m.role === 'user' ? '#0D9488' : '#F1F5F9',
+                    color: m.role === 'user' ? '#fff' : '#334155',
+                  }}>{m.text}</div>
                 </div>
               ))}
             </div>
-
-            <div style={{background:'var(--navy)',border:'1px solid rgba(240,192,64,.2)',borderRadius:13,padding:16}}>
-              <div style={{fontSize:13,fontWeight:600,color:'var(--gold2)',marginBottom:7}}>Right now supply is very limited</div>
-              <div style={{fontSize:12,color:'var(--lgray)',lineHeight:1.6}}>There are very few comparable detached homes available in Willoughby at this moment. The homeowners who list first in a low-supply market consistently capture the strongest offers.</div>
-            </div>
-
-            <div style={{background:'#fff',border:'1px solid var(--border)',borderRadius:13,padding:18}}>
-              <div style={{fontSize:15,fontWeight:700,color:'var(--navy)',marginBottom:5}}>Get the full report as a PDF</div>
-              <div style={{fontSize:12,color:'var(--gray)',marginBottom:14,lineHeight:1.5}}>Includes your renovation-adjusted estimate, net-in-pocket number, full comp breakdown, and move cost calculator.</div>
-              <div style={{display:'flex',flexDirection:'column',gap:9}}>
-                <input className="inp" type="email" placeholder="your@email.com" value={email} onChange={e=>setEmail(e.target.value)}/>
-                <button className="btn btn-teal" onClick={submitG3} disabled={loadingEmail} style={{fontSize:14}}>
-                  {loadingEmail ? 'Sending...' : 'Email me the full report →'}
-                </button>
-                <p style={{fontSize:11,color:'var(--gray)',textAlign:'center'}}>Kamran Khan will follow up personally within 24 hours</p>
-              </div>
+            <div style={{ padding: '12px 16px', borderTop: '1px solid #E2E8F0', display: 'flex', gap: 8 }}>
+              <input
+                value={chatInput}
+                onChange={e => setChatInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleChat()}
+                placeholder="Type a question..."
+                style={{ flex: 1, padding: '10px 14px', border: '1px solid #CBD5E1', borderRadius: 8, fontSize: 14, outline: 'none' }}
+              />
+              <button onClick={handleChat} style={{ padding: '10px 16px', background: '#0D9488', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 700 }}>→</button>
             </div>
           </div>
-        </div>
-
-        <footer style={{background:'var(--navy2)',borderTop:'1px solid rgba(255,255,255,.06)',padding:'20px 24px',display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,fontSize:11,color:'var(--gray)'}}>
-          <span>Kamran Khan · REALTOR® · Royal Lepage Global Force Realty · +1-236-660-2594</span>
-          <span><a href="#" onClick={e=>{e.preventDefault();setGate('privacy')}} style={{color:'var(--gray)',textDecoration:'none'}}>Privacy Policy</a> &nbsp;·&nbsp; Based on MLS data Sept–Oct 2025 · Estimates only</span>
-        </footer>
-      </main>
-
-      {/* ═══ GATE 4 ═══ */}
-      <main style={{display: gate==='gate4'?'flex':'none', flexDirection:'column', minHeight:'100vh', background:'var(--navy)', alignItems:'center', justifyContent:'center', padding:'72px 20px'}}>
-        <div style={{background:'#fff',borderRadius:18,padding:'44px 38px',maxWidth:540,width:'100%',textAlign:'center'}}>
-          <div style={{width:60,height:60,background:'var(--green-bg)',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 20px'}}>
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--green)" strokeWidth="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-          </div>
-          <h1 style={{fontFamily:'Georgia,serif',fontSize:26,fontWeight:700,color:'var(--navy)',marginBottom:10}}>Your report is on its way</h1>
-          <p style={{fontSize:14,color:'var(--gray)',lineHeight:1.65,marginBottom:24}}>Check your inbox. <strong>Kamran Khan</strong> will also follow up personally within 24 hours with your complete net-in-pocket number.</p>
-          <div style={{background:'var(--gold-bg)',border:'1px solid var(--gold-border)',borderRadius:12,padding:18,marginBottom:24,textAlign:'left'}}>
-            <div style={{fontSize:14,fontWeight:700,color:'var(--navy)',marginBottom:6}}>Request your neighbourhood position report</div>
-            <div style={{fontSize:12,color:'var(--gray)',lineHeight:1.6}}>I prepare these personally for a limited number of Willoughby homeowners each month. No obligation. No pitch. Just your complete picture.</div>
-          </div>
-          <p style={{fontSize:14,fontWeight:600,color:'var(--navy)',marginBottom:14}}>Book a free 15-minute call</p>
-          <div style={{height:360,background:'var(--off)',borderRadius:12,border:'1px solid var(--border)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:6,color:'var(--gray)',fontSize:13}}>
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
-            <span>Calendly booking goes here</span>
-            <span style={{fontSize:11}}>Add your Calendly embed code</span>
-          </div>
-        </div>
-      </main>
-
-      {/* ═══ PRIVACY ═══ */}
-      <main style={{display: gate==='privacy'?'flex':'none', flexDirection:'column', minHeight:'100vh', background:'var(--off)'}}>
-        <nav className="topnav" style={{background:'var(--navy)'}}><div className="logo" onClick={()=>setGate('gate1')}>EquityReady</div><a href="#" onClick={e=>{e.preventDefault();setGate('gate1')}} style={{fontSize:12,color:'var(--lgray)',textDecoration:'none'}}>← Back</a></nav>
-        <div style={{flex:1,maxWidth:700,margin:'0 auto',padding:'48px 24px',width:'100%'}}>
-          <h1 style={{fontFamily:'Georgia,serif',fontSize:28,color:'var(--navy)',marginBottom:8}}>Privacy Policy</h1>
-          <p style={{fontSize:12,color:'var(--gray)',marginBottom:20}}>Last updated: March 2026</p>
-          {[
-            ['What we collect','When you use EquityReady, we collect the information you voluntarily provide: your property address, name, phone number, and email address. We also log which addresses are looked up on the platform, including anonymous lookups.'],
-            ['How we use it','Your information is used solely to prepare and deliver your personalized equity report and to follow up with you personally. We do not use your information for automated marketing, third-party advertising, or any purpose other than your direct real estate inquiry.'],
-            ['Who sees it','Your information is accessible only to Kamran Khan, REALTOR® at Royal Lepage Global Force Realty. It is never sold, shared, or disclosed to any third party.'],
-            ['Your rights','Under PIPEDA you have the right to access, correct, or request deletion of your personal information at any time. Contact us at Realtormkamran@gmail.com.'],
-            ['Contact','Kamran Khan · REALTOR® · Royal Lepage Global Force Realty · +1-236-660-2594 · Realtormkamran@gmail.com'],
-          ].map(([h,p])=>(
-            <div key={h}>
-              <h2 style={{fontSize:16,fontWeight:600,color:'var(--navy)',margin:'20px 0 8px'}}>{h}</h2>
-              <p style={{fontSize:14,color:'var(--gray)',lineHeight:1.75,marginBottom:14}}>{p}</p>
-            </div>
-          ))}
-        </div>
-      </main>
-    </>
+        )}
+        <button
+          onClick={() => setChatOpen(!chatOpen)}
+          style={{
+            width: 56, height: 56, borderRadius: '50%', background: '#0A1628', border: '3px solid #C8952A',
+            color: '#fff', fontSize: 22, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+            boxShadow: '0 4px 20px rgba(0,0,0,0.25)',
+          }}
+        >
+          💬
+        </button>
+      </div>
+    </div>
   )
 }
