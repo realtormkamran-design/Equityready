@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-head: 'Playfair Display', Georgia, serif;
+    --font-body: 'DM Sans', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { font-family: var(--font-body); }
+  input, select, textarea, button { font-family: var(--font-body); }
+}
+
+@layer utilities {
+  .font-head { font-family: var(--font-head); }
+  .font-body { font-family: var(--font-body); }
+}
+
+/* Animations */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.5; transform: scale(0.8); }
+}
+.animate-fade-up   { animation: fadeUp 0.45s ease forwards; }
+.animate-pulse-dot { animation: pulse-dot 2s ease infinite; }
+
+/* Blur lock */
+.blur-lock { filter: blur(7px); user-select: none; pointer-events: none; }
+
+/* Input styles */
+.er-input {
+  @apply w-full px-4 py-3 rounded-xl border border-gray-200 bg-white text-navy text-base outline-none transition-all;
+  font-size: 16px; /* prevent iOS zoom */
+}
+.er-input:focus { @apply border-teal ring-2 ring-teal/10; }
+.er-input::placeholder { @apply text-lgray; }
+
+.er-input-dark {
+  @apply bg-white/[0.06] border-white/10 text-white;
+}
+.er-input-dark:focus { @apply border-teal bg-white/[0.09]; }
+.er-input-dark::placeholder { @apply text-white/30; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,.15); border-radius: 3px; }
