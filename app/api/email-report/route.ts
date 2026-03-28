@@ -11,13 +11,11 @@ export async function POST(request: NextRequest) {
 
     const supabase = createClient(supabaseUrl, supabaseKey)
 
-    // Update lead stage
     await supabase
       .from('leads')
       .update({ stage: 'report_requested', email })
       .eq('address', address)
 
-    // Build reno summary
     const RENO_LABELS: Record<string, { label: string; low: number; high: number }> = {
       kitchen_full:    { label: 'Kitchen — full renovation',  low: 25000, high: 45000 },
       kitchen_partial: { label: 'Kitchen — partial update',   low: 10000, high: 20000 },
@@ -30,154 +28,194 @@ export async function POST(request: NextRequest) {
     }
 
     const selectedRenos = (checkedRenos || []) as string[]
-    const renoLow  = selectedRenos.reduce((s: number, id: string) => s + (RENO_LABELS[id]?.low ?? 0), 0)
+    const renoLow  = selectedRenos.reduce((s: number, id: string) => s + (RENO_LABELS[id]?.low  ?? 0), 0)
     const renoHigh = selectedRenos.reduce((s: number, id: string) => s + (RENO_LABELS[id]?.high ?? 0), 0)
-    const baseEstLow  = bcaData?.estimateLow  ?? 1353000
-    const baseEstHigh = bcaData?.estimateHigh ?? 1522000
+    const baseEstLow  = bcaData?.estimateLow  ?? 1650000
+    const baseEstHigh = bcaData?.estimateHigh ?? 1786000
     const adjLow  = baseEstLow  + renoLow
     const adjHigh = baseEstHigh + renoHigh
+    const midEstimate = Math.round((adjLow + adjHigh) / 2)
+    const netInPocket = Math.round(midEstimate * 0.93)
 
     const fmt = (n: number) => '$' + n.toLocaleString()
+
+    const purchaseYear = bcaData?.purchaseDate
+      ? new Date(bcaData.purchaseDate).getFullYear()
+      : 2004
+    const yearsOwned = new Date().getFullYear() - purchaseYear
+    const equityGain = bcaData?.equityGain ? fmt(bcaData.equityGain) : '$1,346,058'
+    const equityMultiple = bcaData?.equityMultiple ?? '4.8'
+    const purchasePrice = bcaData?.purchasePrice ? fmt(bcaData.purchasePrice) : '$354,942'
+    const assessedTotal = bcaData?.assessedTotal ? fmt(bcaData.assessedTotal) : '$1,701,000'
 
     const renoRows = selectedRenos.length > 0
       ? selectedRenos.map((id: string) => {
           const r = RENO_LABELS[id]
-          return `<tr style="border-bottom:1px solid #f1f5f9">
-            <td style="padding:10px 0;color:#334155">${r?.label ?? id}</td>
-            <td style="padding:10px 0;text-align:right;color:#0D9488;font-weight:600">+${fmt(r?.low ?? 0)}–${fmt(r?.high ?? 0)}</td>
+          return `<tr>
+            <td style="padding:10px 0;color:#334155;border-bottom:1px solid #f1f5f9">${r?.label ?? id}</td>
+            <td style="padding:10px 0;text-align:right;color:#0D9488;font-weight:700;border-bottom:1px solid #f1f5f9">+${fmt(r?.low ?? 0)}–${fmt(r?.high ?? 0)}</td>
           </tr>`
         }).join('')
-      : `<tr><td colspan="2" style="padding:10px 0;color:#64748b;font-style:italic">No renovations selected</td></tr>`
+      : ''
 
-    // Build HTML email
-    const emailHtml = `
-<!DOCTYPE html>
+    const emailHtml = `<!DOCTYPE html>
 <html>
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:0;background:#F4F6FB;font-family:'Helvetica Neue',Arial,sans-serif">
-<div style="max-width:620px;margin:32px auto;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #e2e8f0">
+<body style="margin:0;padding:0;background:#f0f2f5;font-family:'Helvetica Neue',Arial,sans-serif">
 
-  <!-- Header -->
-  <div style="background:#0A1628;padding:32px 36px">
-    <p style="color:#C8952A;font-size:11px;font-weight:700;letter-spacing:2px;text-transform:uppercase;margin:0 0 8px">EquityReady</p>
-    <h1 style="color:#fff;font-size:22px;font-weight:800;margin:0 0 6px">Your Personalized Equity Report</h1>
-    <p style="color:#64748B;font-size:14px;margin:0">Prepared exclusively for the homeowner at ${address}</p>
+<div style="max-width:600px;margin:0 auto;padding:32px 16px">
+
+  <!-- EMOTIONAL OPENER — no logo, no header, just feeling -->
+  <div style="background:#0A1628;border-radius:16px 16px 0 0;padding:48px 40px 40px;text-align:center">
+    <p style="color:#C8952A;font-size:12px;font-weight:700;letter-spacing:3px;text-transform:uppercase;margin:0 0 20px">
+      A message for the homeowner at
+    </p>
+    <p style="color:#94A3B8;font-size:15px;margin:0 0 32px">${address}</p>
+    
+    <!-- THE EMOTIONAL LINE -->
+    <p style="color:#ffffff;font-size:26px;font-weight:700;line-height:1.4;margin:0 0 16px;max-width:460px;margin-left:auto;margin-right:auto">
+      ${yearsOwned} years ago you made a decision most people were too scared to make.
+    </p>
+    <p style="color:#C8952A;font-size:18px;font-weight:600;margin:0">
+      This is what it's worth.
+    </p>
   </div>
 
-  <!-- Stat cards -->
-  <div style="display:flex;border-bottom:1px solid #e2e8f0">
-    <div style="flex:1;padding:24px 20px;border-right:1px solid #e2e8f0;text-align:center">
-      <p style="color:#64748b;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 8px">Purchased For</p>
-      <p style="color:#0F2B5B;font-size:22px;font-weight:800;margin:0">${bcaData?.purchasePrice ? fmt(bcaData.purchasePrice) : '$342,794'}</p>
-      <p style="color:#94a3b8;font-size:12px;margin:6px 0 0">${bcaData?.purchaseDate ? new Date(bcaData.purchaseDate).getFullYear() : '2004'} · ${bcaData?.yearsOwned ? Math.round(bcaData.yearsOwned) : 22} years ago</p>
-    </div>
-    <div style="flex:1;padding:24px 20px;border-right:1px solid #e2e8f0;text-align:center">
-      <p style="color:#64748b;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 8px">Market Estimate</p>
-      <p style="color:#0F2B5B;font-size:22px;font-weight:800;margin:0">${fmt(adjLow)}–</p>
-      <p style="color:#0F2B5B;font-size:18px;font-weight:700;margin:0">${fmt(adjHigh)}</p>
-      <p style="color:#94a3b8;font-size:12px;margin:6px 0 0">at $451–$481/sqft</p>
-    </div>
-    <div style="flex:1;padding:24px 20px;background:#FEF9EC;text-align:center">
-      <p style="color:#92600A;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 8px">Equity Gained</p>
-      <p style="color:#C8952A;font-size:22px;font-weight:800;margin:0">${bcaData?.equityGain ? fmt(bcaData.equityGain) : '$1,096,206'}+</p>
-      <p style="color:#92600A;font-size:12px;margin:6px 0 0">${bcaData?.equityMultiple ?? '4.2'}x your money · 100% tax-free</p>
+  <!-- THE BIG NUMBER -->
+  <div style="background:#FEF9EC;border-left:5px solid #C8952A;border-right:5px solid #C8952A;padding:40px;text-align:center">
+    <p style="color:#92600A;font-size:13px;font-weight:700;letter-spacing:2px;text-transform:uppercase;margin:0 0 12px">Your tax-free equity gain</p>
+    <p style="color:#C8952A;font-size:64px;font-weight:900;margin:0;line-height:1">${equityGain}+</p>
+    <p style="color:#92600A;font-size:16px;margin:12px 0 0">${equityMultiple}x your original investment · 100% tax-free · principal residence</p>
+    <div style="margin:24px auto 0;padding:16px 24px;background:#fff;border-radius:10px;display:inline-block;border:1px solid #C8952A">
+      <p style="color:#64748B;font-size:12px;text-transform:uppercase;letter-spacing:1px;margin:0 0 6px">What lands in your bank account</p>
+      <p style="color:#0A1628;font-size:28px;font-weight:800;margin:0">~${fmt(netInPocket)}</p>
+      <p style="color:#94A3B8;font-size:12px;margin:6px 0 0">after all costs on an estimated ${fmt(midEstimate)} sale</p>
     </div>
   </div>
 
-  <div style="padding:32px 36px">
+  <!-- WHAT THIS MEANS -->
+  <div style="background:#ffffff;padding:40px">
+    <p style="color:#0A1628;font-size:18px;font-weight:700;margin:0 0 16px">What ${fmt(netInPocket)} actually means</p>
+    <div style="display:grid;gap:12px">
+      ${[
+        { icon: '🏡', text: `Buy a brand new townhome in Langley outright — fully paid, no mortgage — and still have money left over` },
+        { icon: '✈️', text: `Travel for years. Help your kids with a down payment. Invest and generate passive income for life` },
+        { icon: '😮‍💨', text: `Never worry about maintenance, property taxes, or a big home you no longer need` },
+        { icon: '🔒', text: `Lock in your gain now — before new supply in Willoughby puts pricing pressure on 2003-2007 built homes` },
+      ].map(item => `
+      <div style="display:flex;gap:14px;align-items:flex-start;padding:14px;background:#F8FAFC;border-radius:10px;border:1px solid #E2E8F0">
+        <span style="font-size:22px;flex-shrink:0">${item.icon}</span>
+        <p style="color:#334155;font-size:14px;line-height:1.6;margin:0">${item.text}</p>
+      </div>`).join('')}
+    </div>
+  </div>
 
-    <!-- Narrative -->
-    <h2 style="color:#0A1628;font-size:17px;font-weight:700;margin:0 0 14px">Market Analysis</h2>
-    <p style="color:#334155;font-size:15px;line-height:1.8;margin:0 0 28px">${narrative || 'Your Willoughby home sits in one of Langley\'s most established neighbourhoods. Recent comparable sales show strong buyer demand, with homes selling at $451–$481 per square foot — often above BCA assessment.'}</p>
+  <!-- STAT CARDS -->
+  <div style="background:#F8FAFC;border-top:1px solid #E2E8F0;border-bottom:1px solid #E2E8F0;display:flex">
+    <div style="flex:1;padding:20px;text-align:center;border-right:1px solid #E2E8F0">
+      <p style="color:#94A3B8;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 6px">Purchased for</p>
+      <p style="color:#0F2B5B;font-size:20px;font-weight:800;margin:0">${purchasePrice}</p>
+      <p style="color:#94A3B8;font-size:12px;margin:4px 0 0">${purchaseYear} · ${yearsOwned} yrs ago</p>
+    </div>
+    <div style="flex:1;padding:20px;text-align:center;border-right:1px solid #E2E8F0">
+      <p style="color:#94A3B8;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 6px">2026 BCA Assessed</p>
+      <p style="color:#0F2B5B;font-size:20px;font-weight:800;margin:0">${assessedTotal}</p>
+      <p style="color:#94A3B8;font-size:12px;margin:4px 0 0">Official assessment</p>
+    </div>
+    <div style="flex:1;padding:20px;text-align:center">
+      <p style="color:#94A3B8;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin:0 0 6px">Market estimate</p>
+      <p style="color:#0F2B5B;font-size:20px;font-weight:800;margin:0">${fmt(adjLow)}–</p>
+      <p style="color:#0F2B5B;font-size:16px;font-weight:700;margin:0">${fmt(adjHigh)}</p>
+      <p style="color:#94A3B8;font-size:12px;margin:4px 0 0">$451–$481/sqft</p>
+    </div>
+  </div>
 
-    <!-- Comp table -->
-    <h2 style="color:#0A1628;font-size:17px;font-weight:700;margin:0 0 14px">Comparable Sales — Sept–Oct 2025</h2>
-    <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:28px">
+  <!-- NARRATIVE -->
+  <div style="background:#ffffff;padding:36px 40px">
+    <p style="color:#0A1628;font-size:17px;font-weight:700;margin:0 0 14px">What the market is telling us about your home</p>
+    <p style="color:#334155;font-size:15px;line-height:1.9;margin:0">${narrative || `Your home sits in one of Willoughby's most established neighbourhoods. Three comparable homes sold between September and October 2025 at an average of $468 per square foot — with two of three selling above their BC Assessment by an average of $111,500. The market is active, supply is limited, and homes like yours are selling in an average of 28 days.`}</p>
+  </div>
+
+  <!-- COMP TABLE -->
+  <div style="background:#F8FAFC;padding:36px 40px;border-top:1px solid #E2E8F0">
+    <p style="color:#0A1628;font-size:16px;font-weight:700;margin:0 0 16px">Verified sales on your street — Sept–Oct 2025</p>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
       <thead>
-        <tr style="border-bottom:2px solid #e2e8f0">
-          <th style="padding:10px 0;text-align:left;color:#64748b;font-size:12px;font-weight:600">Street</th>
-          <th style="padding:10px 0;text-align:left;color:#64748b;font-size:12px;font-weight:600">Sold</th>
-          <th style="padding:10px 0;text-align:left;color:#64748b;font-size:12px;font-weight:600">BCA</th>
-          <th style="padding:10px 0;text-align:left;color:#64748b;font-size:12px;font-weight:600">Sold Price</th>
-          <th style="padding:10px 0;text-align:left;color:#64748b;font-size:12px;font-weight:600">vs BCA</th>
-          <th style="padding:10px 0;text-align:right;color:#64748b;font-size:12px;font-weight:600">Days</th>
+        <tr style="border-bottom:2px solid #E2E8F0">
+          <th style="padding:8px 0;text-align:left;color:#64748B;font-weight:600;font-size:11px;text-transform:uppercase">Street</th>
+          <th style="padding:8px 0;text-align:left;color:#64748B;font-weight:600;font-size:11px;text-transform:uppercase">Sold</th>
+          <th style="padding:8px 0;text-align:left;color:#64748B;font-weight:600;font-size:11px;text-transform:uppercase">BCA</th>
+          <th style="padding:8px 0;text-align:left;color:#64748B;font-weight:600;font-size:11px;text-transform:uppercase">Sold Price</th>
+          <th style="padding:8px 0;text-align:right;color:#64748B;font-weight:600;font-size:11px;text-transform:uppercase">vs BCA</th>
         </tr>
       </thead>
       <tbody>
-        <tr style="border-bottom:1px solid #f1f5f9">
-          <td style="padding:12px 0">69A Ave, Willoughby</td>
-          <td style="padding:12px 0;color:#64748b">Sep 2025</td>
-          <td style="padding:12px 0;color:#64748b">$1,543,000</td>
+        <tr style="border-bottom:1px solid #F1F5F9">
+          <td style="padding:12px 0">69A Ave</td>
+          <td style="padding:12px 0;color:#64748B">Sep 2025</td>
+          <td style="padding:12px 0;color:#64748B">$1,543,000</td>
           <td style="padding:12px 0;font-weight:600">$1,650,000</td>
-          <td style="padding:12px 0;color:#166534;font-weight:700">+$107,000</td>
-          <td style="padding:12px 0;text-align:right;color:#64748b">19</td>
+          <td style="padding:12px 0;text-align:right;color:#166534;font-weight:700">+$107,000</td>
         </tr>
-        <tr style="border-bottom:1px solid #f1f5f9">
-          <td style="padding:12px 0">69 Ave, Willoughby</td>
-          <td style="padding:12px 0;color:#64748b">Sep 2025</td>
-          <td style="padding:12px 0;color:#64748b">$1,486,000</td>
+        <tr style="border-bottom:1px solid #F1F5F9">
+          <td style="padding:12px 0">69 Ave</td>
+          <td style="padding:12px 0;color:#64748B">Sep 2025</td>
+          <td style="padding:12px 0;color:#64748B">$1,486,000</td>
           <td style="padding:12px 0;font-weight:600">$1,480,000</td>
-          <td style="padding:12px 0;color:#64748b">at assessed</td>
-          <td style="padding:12px 0;text-align:right;color:#64748b">28</td>
+          <td style="padding:12px 0;text-align:right;color:#64748B">at assessed</td>
         </tr>
-        <tr style="border-bottom:1px solid #f1f5f9">
-          <td style="padding:12px 0">70A Ave, Willoughby</td>
-          <td style="padding:12px 0;color:#64748b">Oct 2025</td>
-          <td style="padding:12px 0;color:#64748b">$1,239,000</td>
+        <tr>
+          <td style="padding:12px 0">70A Ave</td>
+          <td style="padding:12px 0;color:#64748B">Oct 2025</td>
+          <td style="padding:12px 0;color:#64748B">$1,239,000</td>
           <td style="padding:12px 0;font-weight:600">$1,355,000</td>
-          <td style="padding:12px 0;color:#166534;font-weight:700">+$116,000</td>
-          <td style="padding:12px 0;text-align:right;color:#64748b">38</td>
+          <td style="padding:12px 0;text-align:right;color:#166534;font-weight:700">+$116,000</td>
         </tr>
       </tbody>
     </table>
-    <div style="background:#FEF9EC;border:1px solid #C8952A;border-radius:8px;padding:14px 16px;margin-bottom:28px">
+    <div style="margin-top:14px;padding:12px 16px;background:#FEF9EC;border-radius:8px;border:1px solid #C8952A">
       <p style="color:#92600A;font-size:13px;font-weight:600;margin:0">2 of 3 homes sold above BCA by avg $111,500 · $451–$481/sqft · Avg 28 days on market</p>
-    </div>
-
-    <!-- Reno section -->
-    ${selectedRenos.length > 0 ? `
-    <h2 style="color:#0A1628;font-size:17px;font-weight:700;margin:0 0 14px">Renovation-Adjusted Estimate</h2>
-    <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:14px">
-      <tbody>${renoRows}</tbody>
-    </table>
-    <div style="background:#F0FDFA;border:1px solid #0D9488;border-radius:8px;padding:14px 16px;margin-bottom:28px">
-      <p style="color:#0A1628;font-size:15px;font-weight:700;margin:0">Adjusted estimate: ${fmt(adjLow)} – ${fmt(adjHigh)}</p>
-      <p style="color:#64748b;font-size:13px;margin:6px 0 0">Buyer premium for your upgrades: +${fmt(renoLow)}–${fmt(renoHigh)}</p>
-    </div>
-    ` : ''}
-
-    <!-- Net in pocket -->
-    <h2 style="color:#0A1628;font-size:17px;font-weight:700;margin:0 0 14px">Your Net-In-Pocket Estimate</h2>
-    <p style="color:#334155;font-size:14px;line-height:1.7;margin:0 0 28px">
-      On a sale around ${fmt(Math.round((adjLow + adjHigh) / 2))}, after realtor commission, legal fees, and moving costs, 
-      most original Willoughby owners in this range walk away with approximately 
-      <strong>${fmt(Math.round((adjLow + adjHigh) / 2 * 0.93))}</strong> in hand — completely tax-free as your principal residence.
-    </p>
-
-    <!-- CTA -->
-    <div style="background:#0A1628;border-radius:12px;padding:28px;text-align:center;margin-bottom:12px">
-      <p style="color:#C8952A;font-size:13px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin:0 0 8px">Next Step</p>
-      <p style="color:#fff;font-size:18px;font-weight:700;margin:0 0 6px">Book a free 15-minute call</p>
-      <p style="color:#94A3B8;font-size:14px;margin:0 0 20px">No obligation. I'll show you your exact number and the full buyer list.</p>
-      <a href="tel:+12366602594" style="display:inline-block;padding:14px 32px;background:#C8952A;color:#fff;font-weight:700;font-size:15px;border-radius:10px;text-decoration:none">
-        Call +1-236-660-2594
-      </a>
-    </div>
-
-    <!-- Realtor sig -->
-    <div style="border-top:1px solid #e2e8f0;padding-top:24px;margin-top:24px">
-      <p style="font-weight:800;font-size:17px;color:#0A1628;margin:0 0 4px">Kamran Khan</p>
-      <p style="color:#64748B;font-size:14px;margin:0 0 4px">REALTOR® · Royal Lepage Global Force Realty</p>
-      <p style="color:#64748B;font-size:14px;margin:0 0 4px">+1-236-660-2594 · Realtormkamran@gmail.com</p>
-      <p style="color:#64748B;font-size:14px;margin:0">equityready.ca</p>
     </div>
   </div>
 
-  <!-- Footer -->
-  <div style="background:#F8FAFC;padding:20px 36px;border-top:1px solid #e2e8f0">
-    <p style="color:#94A3B8;font-size:11px;margin:0;line-height:1.6">
-      Based on 3 verified MLS transactions in Willoughby, Sept–Oct 2025. Market estimates only — verify with current MLS data before any transaction. 
-      This report was prepared exclusively for the property address listed above and is not for general distribution.
+  ${selectedRenos.length > 0 ? `
+  <!-- RENO ADJUSTMENTS -->
+  <div style="background:#F0FDFA;padding:36px 40px;border-top:1px solid #0D9488">
+    <p style="color:#0A1628;font-size:16px;font-weight:700;margin:0 0 14px">Your renovation-adjusted estimate</p>
+    <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:16px">
+      <tbody>${renoRows}</tbody>
+    </table>
+    <div style="padding:16px;background:#fff;border-radius:10px;border:1px solid #0D9488">
+      <p style="color:#0A1628;font-size:16px;font-weight:700;margin:0">Adjusted range: ${fmt(adjLow)} – ${fmt(adjHigh)}</p>
+      <p style="color:#64748B;font-size:13px;margin:4px 0 0">Buyer premium for your upgrades: +${fmt(renoLow)}–${fmt(renoHigh)}</p>
+    </div>
+  </div>` : ''}
+
+  <!-- CTA -->
+  <div style="background:#0A1628;padding:48px 40px;text-align:center">
+    <p style="color:#C8952A;font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;margin:0 0 12px">You already made the smart move</p>
+    <p style="color:#ffffff;font-size:22px;font-weight:700;margin:0 0 8px;line-height:1.4">This is just about knowing<br>when to take the win.</p>
+    <p style="color:#94A3B8;font-size:14px;margin:0 0 28px;line-height:1.6">15 minutes. No obligation. I'll show you your exact net number,<br>walk you through the process, and answer every question you have.</p>
+    <a href="tel:+12366602594" style="display:inline-block;padding:16px 40px;background:#C8952A;color:#fff;font-weight:800;font-size:16px;border-radius:12px;text-decoration:none;letter-spacing:0.5px">
+      Call Kamran · +1-236-660-2594
+    </a>
+    <p style="color:#4A6080;font-size:13px;margin:20px 0 0">Or reply to this email — I read every one personally.</p>
+  </div>
+
+  <!-- SIGNATURE -->
+  <div style="background:#fff;padding:32px 40px;border-top:1px solid #E2E8F0">
+    <p style="font-weight:800;font-size:18px;color:#0A1628;margin:0 0 4px">Kamran Khan</p>
+    <p style="color:#64748B;font-size:14px;margin:0 0 2px">REALTOR® · Royal Lepage Global Force Realty</p>
+    <p style="color:#64748B;font-size:14px;margin:0 0 2px">+1-236-660-2594</p>
+    <p style="color:#64748B;font-size:14px;margin:0 0 2px">Realtormkamran@gmail.com</p>
+    <p style="color:#0D9488;font-size:14px;margin:0">equityready.ca</p>
+  </div>
+
+  <!-- FOOTER -->
+  <div style="background:#F8FAFC;padding:20px 40px;border-top:1px solid #E2E8F0;border-radius:0 0 16px 16px">
+    <p style="color:#94A3B8;font-size:11px;margin:0;line-height:1.6;text-align:center">
+      Based on 3 verified MLS transactions in Willoughby, Sept–Oct 2025. Market estimates only — verify with current MLS data before any transaction.
+      This report was prepared exclusively for the homeowner at ${address}.
     </p>
   </div>
 
@@ -185,20 +223,16 @@ export async function POST(request: NextRequest) {
 </body>
 </html>`
 
-    // Send via Resend
     const resendKey = process.env.RESEND_API_KEY
     if (resendKey && email) {
       // Email to homeowner
       await fetch('https://api.resend.com/emails', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${resendKey}`,
-        },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${resendKey}` },
         body: JSON.stringify({
           from: 'Kamran Khan <kamran@equityready.ca>',
           to: email,
-          subject: `Your Willoughby equity report — ${address}`,
+          subject: `Your Willoughby equity — ${equityGain} tax-free · ${address.split(',')[0]}`,
           html: emailHtml,
         }),
       })
@@ -206,22 +240,26 @@ export async function POST(request: NextRequest) {
       // Alert to Kamran
       await fetch('https://api.resend.com/emails', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${resendKey}`,
-        },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${resendKey}` },
         body: JSON.stringify({
           from: 'EquityReady Leads <kamran@equityready.ca>',
           to: process.env.REALTOR_EMAIL || 'Realtormkamran@gmail.com',
-          subject: `🔥 PDF requested — ${name} · ${phone} · ${address}`,
-          html: `<p><strong>New PDF report requested:</strong></p>
-<p>Name: <strong>${name}</strong><br>
-Phone: <strong>${phone}</strong><br>
-Email: <strong>${email}</strong><br>
-Address: <strong>${address}</strong><br>
-Renovations selected: ${selectedRenos.length > 0 ? selectedRenos.join(', ') : 'None'}</p>
-<p>Adjusted estimate range: <strong>${fmt(adjLow)} – ${fmt(adjHigh)}</strong></p>
-<p>Follow up within 24 hours.</p>`,
+          subject: `🔥 New lead — ${name} · ${phone} · ${address.split(',')[0]}`,
+          html: `<div style="font-family:sans-serif;max-width:500px;margin:0 auto;padding:24px">
+            <h2 style="color:#0A1628">New PDF report requested</h2>
+            <table style="width:100%;border-collapse:collapse">
+              <tr><td style="padding:8px 0;color:#64748B;font-size:14px">Name</td><td style="padding:8px 0;font-weight:700">${name}</td></tr>
+              <tr><td style="padding:8px 0;color:#64748B;font-size:14px">Phone</td><td style="padding:8px 0;font-weight:700"><a href="tel:${phone}">${phone}</a></td></tr>
+              <tr><td style="padding:8px 0;color:#64748B;font-size:14px">Email</td><td style="padding:8px 0;font-weight:700">${email}</td></tr>
+              <tr><td style="padding:8px 0;color:#64748B;font-size:14px">Address</td><td style="padding:8px 0;font-weight:700">${address}</td></tr>
+              <tr><td style="padding:8px 0;color:#64748B;font-size:14px">Equity gain</td><td style="padding:8px 0;font-weight:700;color:#C8952A">${equityGain}</td></tr>
+              <tr><td style="padding:8px 0;color:#64748B;font-size:14px">Estimate range</td><td style="padding:8px 0;font-weight:700">${fmt(adjLow)} – ${fmt(adjHigh)}</td></tr>
+              <tr><td style="padding:8px 0;color:#64748B;font-size:14px">Renovations</td><td style="padding:8px 0">${selectedRenos.length > 0 ? selectedRenos.join(', ') : 'None selected'}</td></tr>
+            </table>
+            <div style="margin-top:20px;padding:16px;background:#FEF9EC;border-radius:8px;border:1px solid #C8952A">
+              <p style="font-weight:700;color:#0A1628;margin:0">Follow up within 24 hours. Call or text ${phone}.</p>
+            </div>
+          </div>`,
         }),
       })
     }
