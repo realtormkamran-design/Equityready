@@ -231,7 +231,7 @@ export default function Home() {
     return parts.join(' · ')
   })()
 
-  const DISCLAIMER = `Market estimates are based on 3 verified MLS transactions in Willoughby, Sept–Oct 2025 and BC Assessment data. All figures are estimates only — verify with current MLS data before any transaction. Kamran Khan is a licensed REALTOR® with Royal Lepage Global Force Realty. This is not a formal appraisal.`
+  const DISCLAIMER = `Market estimates are generated using automated tools, publicly available BC Assessment data, and 3 verified MLS transactions in Willoughby, Sept–Oct 2025. All figures are estimates only and do not constitute a Comparative Market Analysis (CMA), formal market evaluation, or appraisal. A formal market evaluation requires an in-person assessment by a licensed REALTOR® and a signed representation agreement. These estimates should not be used as the basis for any real estate transaction. Kamran Khan is a licensed REALTOR® with Royal Lepage Global Force Realty. By using this site you acknowledge that all estimates are for general informational purposes only — verify with current MLS data before any transaction.`
 
   return (
     <div style={{ fontFamily: "'DM Sans', system-ui, sans-serif", background: '#F4F6FB', minHeight: '100vh', color: '#0F2B5B' }}>
@@ -308,6 +308,7 @@ export default function Home() {
               </button>
             </div>
             <p style={{ color: '#4A6080', fontSize: 13, marginTop: 14 }}>No sign-up required · Takes 30 seconds</p>
+            <p style={{ color: '#4A6080', fontSize: 11, marginTop: 6 }}>Estimates are for informational purposes only and do not constitute a formal market evaluation or appraisal.</p>
 
             {/* Trust badge */}
             <div style={{ marginTop: 40, display: 'inline-flex', alignItems: 'center', gap: 8, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 100, padding: '10px 20px' }}>
