@@ -75,7 +75,7 @@ export async function POST(request: NextRequest) {
     if (fubKey && name && phone) {
       try {
         const fubPayload = {
-          source: 'EquityReady',
+          source: 'equityready.ca',
           type: 'Registration',
           person: {
             firstName: name.split(' ')[0] || name,
@@ -92,16 +92,25 @@ Equity gain: ${bcaRecord?.equity_gain ? '$' + Number(bcaRecord.equity_gain).toLo
 Source: equityready.ca`,
         }
 
-        await fetch('https://api.followupboss.com/v1/events', {
+        const fubRes = await fetch('https://api.followupboss.com/v1/events', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            // Basic auth: API key as username, empty password
             'Authorization': `Basic ${Buffer.from(fubKey + ':').toString('base64')}`,
+            // System headers — use your domain as system name
             'X-System': 'EquityReady',
             'X-System-Key': fubKey,
           },
           body: JSON.stringify(fubPayload),
         })
+
+        if (!fubRes.ok) {
+          const errText = await fubRes.text()
+          console.error('FUB error response:', fubRes.status, errText)
+        } else {
+          console.log('FUB lead created successfully')
+        }
       } catch (fubError) {
         console.error('FUB error at Gate 2:', fubError)
       }
