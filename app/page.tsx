@@ -84,6 +84,10 @@ export default function Home() {
     { role: 'assistant', text: "Hi! I can answer any questions about your home's value in Willoughby. What's on your mind?" }
   ])
   const [chatInput, setChatInput] = useState('')
+  const [outOfArea, setOutOfArea] = useState(false)
+  const [outOfAreaMsg, setOutOfAreaMsg] = useState('')
+  const [manualEmail, setManualEmail] = useState('')
+  const [manualSubmitted, setManualSubmitted] = useState(false)
 
   const addressInputRef = useRef<HTMLInputElement>(null)
   const autocompleteRef = useRef<any>(null)
@@ -93,11 +97,20 @@ export default function Home() {
     if (googleMapsLoaded.current) return
     const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_KEY
     if (!apiKey) return
-    window.initGoogleMaps = () => { googleMapsLoaded.current = true; initAutocomplete() }
-    const script = document.createElement('script')
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places&callback=initGoogleMaps`
-    script.async = true; script.defer = true
-    document.head.appendChild(script)
+    window.initGoogleMaps = () => {
+      googleMapsLoaded.current = true
+      initAutocomplete()
+    }
+    // Only add script if not already present
+    if (!document.querySelector('script[src*="maps.googleapis.com"]')) {
+      const script = document.createElement('script')
+      script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places&callback=initGoogleMaps`
+      script.async = true; script.defer = true
+      document.head.appendChild(script)
+    } else if (window.google) {
+      googleMapsLoaded.current = true
+      initAutocomplete()
+    }
   }, [])
 
   const initAutocomplete = useCallback(() => {
@@ -123,14 +136,44 @@ export default function Home() {
   async function handleAddressSubmit() {
     if (!address.trim()) return
     setLoading(true)
+    // Always reset state on new search
+    setBcaData(null)
+    setOutOfArea(false)
+    setOutOfAreaMsg('')
+    setNarrative('')
+    setCheckedRenos([])
+    setEmailSent(false)
+    setManualSubmitted(false)
+    setManualEmail('')
     try {
-      const res = await fetch('/api/lookup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ address }) })
+      const res = await fetch('/api/lookup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address }),
+      })
       const data = await res.json()
-      if (data.bcaData) setBcaData(data.bcaData)
+      if (data.outOfArea || data.notFound) {
+        setOutOfArea(true)
+        setOutOfAreaMsg(data.message || "We don't have automated data for this address yet. Kamran will prepare your report personally within 24 hours.")
+      } else if (data.bcaData) {
+        setBcaData(data.bcaData)
+      }
       setLead(prev => ({ ...prev, address }))
     } catch {}
     setLoading(false)
     setGate(2)
+  }
+
+  async function handleManualCapture() {
+    if (!manualEmail.includes('@')) return
+    try {
+      await fetch('/api/lookup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address, manualEmail }),
+      })
+    } catch {}
+    setManualSubmitted(true)
   }
 
   async function handleUnlock() {
@@ -392,7 +435,38 @@ export default function Home() {
               <p style={{ color: '#64748B', fontSize: 13, marginTop: 6 }}>Willoughby · Original build</p>
             </div>
             <div style={{ padding: '28px 32px' }}>
-              <div className="gate2-cards" style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginBottom: 24 }}>
+              {outOfArea ? (
+                // OUT OF AREA — capture form
+                <div>
+                  <div style={{ background: '#FEF9EC', border: '1px solid #C8952A', borderRadius: 12, padding: '20px', marginBottom: 20 }}>
+                    <p style={{ color: '#92600A', fontWeight: 700, fontSize: 15, marginBottom: 8 }}>📍 Outside our automated coverage</p>
+                    <p style={{ color: '#334155', fontSize: 14, lineHeight: 1.7, margin: 0 }}>{outOfAreaMsg}</p>
+                  </div>
+                  {!manualSubmitted ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                      <p style={{ color: '#64748B', fontSize: 14, textAlign: 'center', lineHeight: 1.6 }}>
+                        Leave your email and Kamran will prepare your personalized market analysis within 24 hours — real local expertise, not an automated tool.
+                      </p>
+                      <input value={manualEmail} onChange={e => setManualEmail(e.target.value)} placeholder="your@email.com" type="email" style={{ padding: '15px 18px', border: '1.5px solid #CBD5E1', borderRadius: 10, fontSize: 16, outline: 'none' }} />
+                      <button onClick={handleManualCapture} disabled={!manualEmail.includes('@')} style={{ padding: '16px', background: '#0D9488', color: '#fff', fontWeight: 700, fontSize: 16, border: 'none', borderRadius: 12, cursor: manualEmail.includes('@') ? 'pointer' : 'not-allowed', opacity: manualEmail.includes('@') ? 1 : 0.6 }}>
+                        Send me a personal report →
+                      </button>
+                      <div style={{ textAlign: 'center', marginTop: 8 }}>
+                        <p style={{ color: '#94A3B8', fontSize: 13, marginBottom: 8 }}>Or call Kamran directly:</p>
+                        <a href="tel:+12366602594" style={{ color: '#C8952A', fontWeight: 700, fontSize: 16, textDecoration: 'none' }}>+1-236-660-2594</a>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ background: '#F0FDF4', border: '1px solid #166534', borderRadius: 10, padding: '28px', textAlign: 'center' }}>
+                      <p style={{ fontSize: 40, marginBottom: 12 }}>✅</p>
+                      <p style={{ color: '#166534', fontWeight: 700, fontSize: 16, marginBottom: 8 }}>Got it — Kamran will be in touch within 24 hours</p>
+                      <p style={{ color: '#64748B', fontSize: 14 }}>Check your inbox for your personalized market analysis.</p>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                // NORMAL — blurred cards + form
+                <div>
                 <div style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: 12, padding: '16px 12px', textAlign: 'center' }}>
                   <div style={{ color: '#64748B', fontSize: 10, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>BCA Assessed</div>
                   <div style={{ fontWeight: 800, fontSize: 18, color: '#0F2B5B' }}>{bcaData ? fmt(bcaData.assessedTotal) : '$1,701,000'}</div>
@@ -426,6 +500,8 @@ export default function Home() {
                 </button>
                 <p style={{ textAlign: 'center', color: '#94A3B8', fontSize: 12 }}>No spam. No pressure. Used only to prepare your personalized report.</p>
               </div>
+              </div>
+              )}
             </div>
           </div>
         </div>
