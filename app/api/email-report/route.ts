@@ -232,7 +232,7 @@ export async function POST(request: NextRequest) {
         body: JSON.stringify({
           from: 'Kamran Khan <kamran@equityready.ca>',
           to: email,
-          subject: `Your Willoughby home report is ready — Kamran Khan`,
+          subject: `Your Willoughby equity — ${equityGain} tax-free · ${address.split(',')[0]}`,
           html: emailHtml,
         }),
       })
@@ -262,6 +262,47 @@ export async function POST(request: NextRequest) {
           </div>`,
         }),
       })
+    }
+
+    // ── Follow Up Boss integration ──────────────────────────────────────────
+    const fubKey = process.env.FOLLOWUPBOSS_API_KEY
+    if (fubKey && name && phone) {
+      try {
+        const fubPayload = {
+          source: 'EquityReady',
+          type: 'Registration',
+          person: {
+            firstName: name.split(' ')[0] || name,
+            lastName: name.split(' ').slice(1).join(' ') || '',
+            emails: email ? [{ value: email, type: 'home' }] : [],
+            phones: [{ value: phone, type: 'mobile' }],
+            addresses: [{
+              street: address,
+              type: 'home',
+            }],
+            tags: ['EquityReady', 'Willoughby', 'PDF Requested'],
+          },
+          notes: `EquityReady lead — ${address}
+Equity gain: ${bcaData?.equityGain ? fmt(Number(bcaData.equityGain)) : 'N/A'}
+Market estimate: ${fmt(adjLow)} – ${fmt(adjHigh)}
+Renovations selected: ${selectedRenos.length > 0 ? selectedRenos.join(', ') : 'None'}
+Source: equityready.ca PDF report request`,
+        }
+
+        await fetch('https://api.followupboss.com/v1/events', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Basic ${Buffer.from(fubKey + ':').toString('base64')}`,
+            'X-System': 'EquityReady',
+            'X-System-Key': fubKey,
+          },
+          body: JSON.stringify(fubPayload),
+        })
+      } catch (fubError) {
+        // FUB failure should never block the email from sending
+        console.error('Follow Up Boss error:', fubError)
+      }
     }
 
     return NextResponse.json({ success: true })
