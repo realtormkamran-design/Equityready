@@ -232,7 +232,7 @@ export async function POST(request: NextRequest) {
         body: JSON.stringify({
           from: 'Kamran Khan <kamran@equityready.ca>',
           to: email,
-          subject: `Your Willoughby equity — ${equityGain} tax-free · ${address.split(',')[0]}`,
+          subject: `Your Willoughby home report is ready — Kamran Khan`,
           html: emailHtml,
         }),
       })
